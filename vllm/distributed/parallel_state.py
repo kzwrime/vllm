@@ -225,7 +225,11 @@ class GroupCoordinator:
                 ranks, backend=torch_distributed_backend)
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
-            cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+            if torch_distributed_backend == "mpi":
+                cpu_group = torch.distributed.new_group(ranks, backend="mpi")
+            else:
+                cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+            
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
@@ -274,6 +278,9 @@ class GroupCoordinator:
 
         self.use_cpu_custom_send_recv = (current_platform.is_cpu() and hasattr(
             torch.ops._C, "init_shm_manager"))
+        
+        if torch_distributed_backend == "mpi":
+            self.use_cpu_custom_send_recv = False
 
     @property
     def first_rank(self):
@@ -1059,11 +1066,16 @@ def initialize_model_parallel(
     group_ranks = all_ranks.view(-1, tensor_model_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
 
+    if backend == "mpi":
+        use_message_queue_broadcaster = False
+    else:
+        use_message_queue_broadcaster = True
+
     # message queue broadcaster is only used in tensor model parallel group
     _TP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
-                                    use_message_queue_broadcaster=True,
+                                    use_message_queue_broadcaster=use_message_queue_broadcaster,
                                     group_name="tp")
 
     # Build the pipeline model-parallel groups.

@@ -68,7 +68,8 @@ class CpuPlatform(Platform):
     device_name: str = "cpu"
     device_type: str = "cpu"
     dispatch_key: str = "CPU"
-    dist_backend: str = "gloo"
+    # dist_backend: str = "gloo"
+    dist_backend: str = "mpi"
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -177,7 +178,8 @@ class CpuPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         if (parallel_config.world_size > 1
                 and parallel_config.distributed_executor_backend is not None
-                and parallel_config.distributed_executor_backend != "mp"):
+                and parallel_config.distributed_executor_backend != "mp"
+                and parallel_config.distributed_executor_backend != "external_launcher"):
             logger.warning(("%s is not supported on CPU, fallback to mp "
                             "distributed executor backend."),
                            parallel_config.distributed_executor_backend)
