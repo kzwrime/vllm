@@ -41,25 +41,25 @@ class CPUWorker(Worker):
 
     def init_device(self):
         # Setup OpenMP threads affinity.
-        omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
-        if omp_cpuids == "auto" and platform.system() == "Linux":
-            if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
-                # For POWERPC SMT-8/4/2
-                self.local_omp_cpuid = self._get_autobind_cpu_ids(
-                    lambda cpus: [cpu for cpu in cpus if cpu.id % 8 < 4])
-            elif current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-                # For x86 SMT-2, use 1 CPU per core
-                self.local_omp_cpuid = self._get_autobind_cpu_ids(
-                    lambda cpus: cpus[-1:])
-            else:
-                self.local_omp_cpuid = "all"
-        else:
-            self.local_omp_cpuid = omp_cpuids.split("|")[self.rank]
+        # omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
+        # if omp_cpuids == "auto" and platform.system() == "Linux":
+        #     if current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC:
+        #         # For POWERPC SMT-8/4/2
+        #         self.local_omp_cpuid = self._get_autobind_cpu_ids(
+        #             lambda cpus: [cpu for cpu in cpus if cpu.id % 8 < 4])
+        #     elif current_platform.get_cpu_architecture() == CpuArchEnum.X86:
+        #         # For x86 SMT-2, use 1 CPU per core
+        #         self.local_omp_cpuid = self._get_autobind_cpu_ids(
+        #             lambda cpus: cpus[-1:])
+        #     else:
+        #         self.local_omp_cpuid = "all"
+        # else:
+        #     self.local_omp_cpuid = omp_cpuids.split("|")[self.rank]
 
-        if self.local_omp_cpuid != "all":
-            ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
-            if ret:
-                logger.info(ret)
+        # if self.local_omp_cpuid != "all":
+        #     ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
+        #     if ret:
+        #         logger.info(ret)
 
         # Note: unique identifier for creating allreduce shared memory
         os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.split(
