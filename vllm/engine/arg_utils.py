@@ -1162,10 +1162,10 @@ class EngineArgs:
         self._set_default_args(usage_context, model_config)
         # Disable chunked prefill for POWER (ppc64le)/ARM/s390x CPUs in V1
         if current_platform.is_cpu() and current_platform.get_cpu_architecture(
-        ) in (CpuArchEnum.POWERPC, CpuArchEnum.S390X, CpuArchEnum.ARM):
-            logger.info("Chunked prefill is not supported for ARM and POWER "
-                        "and S390X CPUs; "
-                        "disabling it for V1 backend.")
+        ) != CpuArchEnum.X86:
+            logger.info(
+                "Chunked prefill is not supported CPUs other than X86; "
+                "disabling it for V1 backend.")
             self.enable_chunked_prefill = False
         assert self.enable_chunked_prefill is not None
 
