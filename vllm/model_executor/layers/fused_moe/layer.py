@@ -328,8 +328,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             layer.w2_weight.data = shuffled_w2
 
         if current_platform.is_cpu():
+            from vllm.model_executor.layers.fused_moe import cpu_fused_moe
             if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-                from vllm.model_executor.layers.fused_moe import cpu_fused_moe
                 dtype = layer.w13_weight.dtype
                 if (envs.VLLM_CPU_SGL_KERNEL
                         and torch._C._cpu._is_amx_tile_supported()
@@ -347,7 +347,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 else:
                     layer.cpu_fused_moe = cpu_fused_moe.IPEXFusedMOE(layer)
             else:
-                raise NotImplementedError("CPU MOE only supports x86 arch.")
+                layer.cpu_fused_moe = cpu_fused_moe.SWFusedMOE(layer)
+                # raise NotImplementedError("CPU MOE only supports x86 arch.")
 
     def apply(
         self,
