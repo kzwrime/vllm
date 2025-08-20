@@ -232,12 +232,22 @@ class CpuPlatform(Platform):
 
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-        # Note: to avoid the error 'nthreads cannot be larger than environment
-        #  variable "NUMEXPR_MAX_THREADS" (64)'.
-        os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
-
-        # Set default threads num for OpenMP parallel
-        os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
+        omp_num_threads_str = os.getenv('OMP_NUM_THREADS')
+        if omp_num_threads_str is None:
+            # Note: to avoid the error 'nthreads cannot be larger than environment
+            #  variable "NUMEXPR_MAX_THREADS" (64)'.
+            os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
+            # Set default threads num for OpenMP parallel
+            os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
+        else:
+            try:
+                omp_num_threads = int(omp_num_threads_str)
+                if omp_num_threads > 0:
+                    os.environ["OMP_NUM_THREADS"] = str(omp_num_threads)
+            except ValueError:
+                logger.warning("Invalid OMP_NUM_THREADS: %s, using default: %d", omp_num_threads_str, torch.get_num_threads())
+                os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
+                os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
 
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
@@ -315,7 +325,10 @@ class CpuPlatform(Platform):
         """
         Get device specific communicator class for distributed communication.
         """
-        return "vllm.distributed.device_communicators.cpu_communicator.CpuCommunicator"  # noqa
+        if cls.dist_backend == "mpi":
+            return "vllm.distributed.device_communicators.cpu_mpi_communicator.CpuMPICommunicator"  # noqa
+        else:
+            return "vllm.distributed.device_communicators.cpu_communicator.CpuCommunicator"  # noqa
 
     @classmethod
     def supports_structured_output(cls) -> bool:
