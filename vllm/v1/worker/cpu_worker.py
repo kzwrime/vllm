@@ -235,3 +235,6 @@ class CPUWorker(Worker):
             self.profiler.start()
         else:
             self.profiler.stop()
+
+    def shutdown(self):
+        return
