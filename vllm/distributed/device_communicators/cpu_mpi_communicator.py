@@ -58,7 +58,7 @@ def all_reduce_auto_convert(tensor: torch.Tensor, group: dist.ProcessGroup) -> t
     
 
 
-    if original_dtype in supported_dtypes:
+    if original_dtype in mpi_supported_dtypes:
         # 如果类型受支持，直接执行 all_reduce
         dist.all_reduce(tensor, group=group)
         return tensor
