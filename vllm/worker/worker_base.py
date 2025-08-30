@@ -275,5 +275,8 @@ class WorkerWrapperBase:
             logger.exception(msg)
             raise e
 
+    def shutdown(self):
+        self.worker.shutdown()
+
     def __getattr__(self, attr):
         return getattr(self.worker, attr)

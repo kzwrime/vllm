@@ -154,3 +154,6 @@ class CPUWorker(Worker):
         logger.info("auto thread-binding list (id, physical core): %s",
                     [(x.id, x.physical_core) for x in logical_cpu_list])
         return ",".join([str(x.id) for x in logical_cpu_list])
+
+    def shutdown(self):
+        return

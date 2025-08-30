@@ -63,3 +63,7 @@ class WorkerBase(WorkerBaseV0):
     def check_health(self) -> None:
         """Basic health check (override for device-specific checks)."""
         return
+
+    def shutdown(self) -> None:
+        """Shutdown the worker (release resources)."""
+        return

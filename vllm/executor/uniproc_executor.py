@@ -100,6 +100,10 @@ class UniProcExecutor(ExecutorBase):
         # it's running.
         return
 
+    def shutdown(self):
+        self.driver_worker.shutdown()
+        super().shutdown()
+
     def reinitialize_distributed(
             self, reconfig_request: ReconfigureDistributedRequest) -> None:
         self.driver_worker.reinitialize_distributed(reconfig_request)
