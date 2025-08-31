@@ -179,7 +179,8 @@ class CpuPlatform(Platform):
         if (parallel_config.world_size > 1
                 and parallel_config.distributed_executor_backend is not None
                 and parallel_config.distributed_executor_backend != "mp"
-                and parallel_config.distributed_executor_backend != "external_launcher"):
+                and parallel_config.distributed_executor_backend
+                != "external_launcher"):
             logger.warning(("%s is not supported on CPU, fallback to mp "
                             "distributed executor backend."),
                            parallel_config.distributed_executor_backend)
@@ -234,8 +235,8 @@ class CpuPlatform(Platform):
 
         omp_num_threads_str = os.getenv('OMP_NUM_THREADS')
         if omp_num_threads_str is None:
-            # Note: to avoid the error 'nthreads cannot be larger than environment
-            #  variable "NUMEXPR_MAX_THREADS" (64)'.
+            # Note: to avoid the error 'nthreads cannot be larger than
+            # environment variable "NUMEXPR_MAX_THREADS" (64)'.
             os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
             # Set default threads num for OpenMP parallel
             os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
@@ -245,7 +246,9 @@ class CpuPlatform(Platform):
                 if omp_num_threads > 0:
                     os.environ["OMP_NUM_THREADS"] = str(omp_num_threads)
             except ValueError:
-                logger.warning("Invalid OMP_NUM_THREADS: %s, using default: %d", omp_num_threads_str, torch.get_num_threads())
+                logger.warning(
+                    "Invalid OMP_NUM_THREADS: %s, using default: %d",
+                    omp_num_threads_str, torch.get_num_threads())
                 os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
                 os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
 

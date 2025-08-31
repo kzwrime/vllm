@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-import platform
 from typing import Callable, Optional
 
 import torch
@@ -11,7 +10,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.utils import set_random_seed
-from vllm.platforms import CpuArchEnum, current_platform
+from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform, LogicalCPUInfo
 from vllm.sequence import IntermediateTensors
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -57,7 +56,8 @@ class CPUWorker(Worker):
         #     self.local_omp_cpuid = omp_cpuids.split("|")[self.rank]
 
         # if self.local_omp_cpuid != "all":
-        #     ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
+        #     ret = torch.ops._C_utils.init_cpu_threads_env(
+        #         self.local_omp_cpuid)
         #     if ret:
         #         logger.info(ret)
 

@@ -214,6 +214,7 @@ class SGLFusedMOE:
         )
         return x
 
+
 class SWFusedMOE:
 
     def __init__(self, layer: torch.nn.Module) -> None:
@@ -266,13 +267,13 @@ class SWFusedMOE:
 
     def _select_experts(
         self,
-        hidden_states : torch.Tensor,
-        router_logits : torch.Tensor,
-        top_k : int,
-        use_grouped_topk : bool,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        use_grouped_topk: bool,
         renormalize: bool,
-        expert_map : torch.Tensor,
-        global_num_experts : int,
+        expert_map: torch.Tensor,
+        global_num_experts: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert hidden_states.shape[0] == router_logits.shape[0]
         if expert_map is not None:
@@ -286,9 +287,11 @@ class SWFusedMOE:
         topk_weights, topk_ids = torch.topk(scores, k=top_k, dim=-1)
 
         if renormalize:
-            topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+            topk_weights = topk_weights / topk_weights.sum(dim=-1,
+                                                           keepdim=True)
 
-        # If an expert map is provided (global -> local, -1 for non-local), map ids
+        # If an expert map is provided (global -> local, -1 for non-local),
+        # map ids
         if expert_map is not None:
             topk_ids = expert_map[topk_ids]
         # topk_weights : [num_tokens, top_k]
@@ -297,16 +300,17 @@ class SWFusedMOE:
 
     def _forward(
         self,
-        x : torch.Tensor,
-        w13_weight : torch.Tensor,
-        w2_weight : torch.Tensor,
-        topk_weights : torch.Tensor,
-        topk_ids : torch.Tensor,
+        x: torch.Tensor,
+        w13_weight: torch.Tensor,
+        w2_weight: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
     ) -> torch.Tensor:
         # x: [num_tokens, hidden_size]
         # w13_weight: [num_experts, 2 * intermediate_size, hidden_size]
         # w2_weight: [num_experts, hidden_size, intermediate_size]
-        # topk_ids: [num_tokens, top_k] (expert ids, may contain -1 for non-local)
+        # topk_ids: [num_tokens, top_k]
+        #           (expert ids, may contain -1 for non-local)
         # topk_weights: [num_tokens, top_k]
 
         num_tokens, hidden_size = x.shape
@@ -334,9 +338,10 @@ class SWFusedMOE:
                 continue
 
             expert_ids_valid = expert_ids_k[valid_mask]
-            token_indices_valid = torch.nonzero(valid_mask, as_tuple=False).squeeze(-1)
+            token_indices_valid = torch.nonzero(valid_mask,
+                                                as_tuple=False).squeeze(-1)
             weights_valid = weights_k[valid_mask]
-           
+
             # Group tokens by expert id for batched matmul
             unique_experts = torch.unique(expert_ids_valid)
             for e in unique_experts.tolist():

@@ -9,30 +9,33 @@ the argument 2 should match the `tensor_parallel_size` below.
 see `tests/distributed/test_torchrun_example.py` for the unit test.
 """
 
+import os
+
 import torch.distributed as dist
 
-import os
 try:
-    rank = int(os.environ['OMPI_COMM_WORLD_RANK'])
-    size = int(os.environ['OMPI_COMM_WORLD_SIZE'])
+    rank = int(os.environ["OMPI_COMM_WORLD_RANK"])
+    size = int(os.environ["OMPI_COMM_WORLD_SIZE"])
     print("OMPI")
     print(f"rank: {rank}, size: {size}")
 except KeyError:
     # 如果不是使用 Open MPI，尝试其他的环境变量
     try:
-        rank = int(os.environ['PMIX_RANK'])
-        size = int(os.environ['PMIX_SIZE'])
+        rank = int(os.environ["PMIX_RANK"])
+        size = int(os.environ["PMIX_SIZE"])
         print("PMIX")
     except KeyError:
-        print("Could not find MPI environment variables. Make sure you are using mpirun.")
+        print(
+            "Could not find MPI environment variables. Make sure you are using mpirun."
+        )
         exit(1)
 
 os.environ["RANK"] = str(rank)
 os.environ["LOCAL_RANK"] = str(rank)
 
 # 这个也是必需的
-os.environ['MASTER_ADDR'] = '172.20.0.2' # 在 MPI 模式下，这些通常会被忽略
-os.environ['MASTER_PORT'] = '29500'   # 但设置它们是好习惯
+os.environ["MASTER_ADDR"] = "172.20.0.2"  # 在 MPI 模式下，这些通常会被忽略
+os.environ["MASTER_PORT"] = "29500"  # 但设置它们是好习惯
 
 
 from vllm import LLM, SamplingParams
