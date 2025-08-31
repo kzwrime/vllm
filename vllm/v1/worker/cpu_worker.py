@@ -68,6 +68,37 @@ class CPUWorker(Worker):
         # Note: unique identifier for creating allreduce shared memory
         os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.split(
             ":")[-1]
+
+        logger.info(
+            ("rank: %d, local_rank: %d, world_size: %d, dist_backend: %s, "
+             "self.distributed_init_method: %s"), self.rank, self.local_rank,
+            self.parallel_config.world_size, current_platform.dist_backend,
+            self.distributed_init_method)
+
+        if current_platform.dist_backend_extra and \
+                current_platform.dist_backend_extra == "mpi":
+            import mpi4py.rc
+            mpi4py.rc.initialize = False
+            mpi4py.rc.finalize = False
+            from mpi4py import MPI
+            MPI.Init()
+            self.mpi_finalize = MPI.Finalize
+            self.mpi_initialized = True
+            self.mpi_world_comm = MPI.COMM_WORLD
+            assert self.mpi_world_comm.Get_rank() == self.rank, (
+                f"mpi_rank: {self.mpi_world_comm.Get_rank()} != "
+                f"rank: {self.rank}")
+            assert self.mpi_world_comm.Get_size() == \
+                self.parallel_config.world_size, (
+                    f"mpi_world_size: {self.mpi_world_comm.Get_size()} != "
+                    f"world_size: {self.parallel_config.world_size}")
+
+            import socket
+            host_name = socket.gethostname()
+            host_ip = socket.gethostbyname(host_name)
+            logger.info("rank: %d, %s@%s, MPI.Is_initialized(): %d", self.rank,
+                        host_name, host_ip, MPI.Is_initialized())
+
         # Initialize the distributed environment.
         init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
@@ -156,4 +187,7 @@ class CPUWorker(Worker):
         return ",".join([str(x.id) for x in logical_cpu_list])
 
     def shutdown(self):
+        if hasattr(self, "mpi_initialized") and self.mpi_initialized:
+            self.mpi_finalize()
+            self.mpi_initialized = False
         return

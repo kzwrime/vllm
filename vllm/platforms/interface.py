@@ -129,6 +129,7 @@ class Platform:
 
     # The backend used for distributed communication.
     dist_backend: str = ""
+    dist_backend_extra: str = ""
 
     supported_quantization: list[str] = []
 
