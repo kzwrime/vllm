@@ -68,8 +68,8 @@ class CpuPlatform(Platform):
     device_name: str = "cpu"
     device_type: str = "cpu"
     dispatch_key: str = "CPU"
-    # dist_backend: str = "gloo"
-    dist_backend: str = "mpi"
+    dist_backend: str = "gloo"
+    dist_backend_extra: str = "mpi"
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -328,7 +328,7 @@ class CpuPlatform(Platform):
         """
         Get device specific communicator class for distributed communication.
         """
-        if cls.dist_backend == "mpi":
+        if cls.dist_backend_extra == "mpi":
             return "vllm.distributed.device_communicators.cpu_mpi_communicator.CpuMPICommunicator"  # noqa
         else:
             return "vllm.distributed.device_communicators.cpu_communicator.CpuCommunicator"  # noqa

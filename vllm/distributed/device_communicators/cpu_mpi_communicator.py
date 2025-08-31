@@ -5,10 +5,19 @@ from typing import Optional, Union
 
 import torch
 import torch.distributed as dist
+from torch.distributed import ProcessGroup
 
 from vllm.logger import init_logger
 
 from .base_device_communicator import DeviceCommunicatorBase
+
+try:
+    import mpi4py.rc
+    mpi4py.rc.initialize = False
+    mpi4py.rc.finalize = False
+    from mpi4py import MPI
+except ImportError:
+    raise ImportError("mpi4py not found.") from None
 
 logger = init_logger(__name__)
 
@@ -101,13 +110,50 @@ def custom_all_gather_into_tensor(output_tensor: torch.Tensor,
 
 class CpuMPICommunicator(DeviceCommunicatorBase):
 
+    def __init__(self,
+                 cpu_group: ProcessGroup,
+                 device: Optional[torch.device] = None,
+                 device_group: Optional[ProcessGroup] = None,
+                 unique_name: str = ""):
+        super().__init__(cpu_group, device, device_group, unique_name)
+
+        logger.info("CpuMPICommunicator initializing ...")
+
+        assert MPI.Is_initialized()
+
+        num_ranks = cpu_group.size()
+        assert num_ranks > 0
+        logger.info("num_ranks: %d", num_ranks)
+
+        global_rank_tensor = torch.tensor([self.global_rank],
+                                          dtype=torch.int32)
+        group_ranks = torch.zeros(num_ranks, dtype=torch.int32)
+        dist.all_gather_into_tensor(group_ranks,
+                                    global_rank_tensor,
+                                    group=self.cpu_group)
+        group_ranks = group_ranks.tolist()
+        logger.info("group_ranks: %s", str(group_ranks))
+
+        mpi_group = MPI.COMM_WORLD.group.Incl(group_ranks)
+        self.mpi_group_comm = MPI.Intracomm.Create_from_group(mpi_group)
+        self.mpi_group_rank = self.mpi_group_comm.Get_rank()
+        self.mpi_group_size = self.mpi_group_comm.Get_size()
+        logger.info("CpuMPICommunicator initialized, rank: %d, world_size: %d",
+                    self.mpi_group_rank, self.mpi_group_size)
+
+        assert self.mpi_group_rank == self.rank
+        assert self.mpi_group_size == self.world_size
+
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        # logger.info(f"all_reduce rank: {self.mpi_group_rank}, "
+        #     f"input_.shape: {input_.shape}, input_.dtype: {input_.dtype}")
         tin = convert_to_supported_dtype(input_)
-        dist.all_reduce(tin, group=self.device_group)
+        self.mpi_group_comm.Allreduce(MPI.IN_PLACE, tin)
         return tin.to(dtype=input_.dtype)
 
-    @torch.inference_mode(mode=False)
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        # logger.info(f"all_gather rank: {self.mpi_group_rank}, "
+        #     f"input_.shape: {input_.shape}, input_.dtype: {input_.dtype}")
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
@@ -123,7 +169,7 @@ class CpuMPICommunicator(DeviceCommunicatorBase):
 
         tin = convert_to_supported_dtype(input_)
         tout = convert_to_supported_dtype(output_tensor)
-        custom_all_gather_into_tensor(tout, tin, group=self.device_group)
+        self.mpi_group_comm.Allgather(tin, tout)
         output_tensor = tout.to(dtype=input_.dtype)
 
         # Reshape
