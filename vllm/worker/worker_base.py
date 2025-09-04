@@ -122,6 +122,9 @@ class WorkerBase:
     def list_loras(self) -> Set[int]:
         raise NotImplementedError
 
+    def shutdown(self) -> None:
+        raise NotImplementedError
+
     @property
     def vocab_size(self) -> int:
         """Get vocabulary size from model configuration."""
