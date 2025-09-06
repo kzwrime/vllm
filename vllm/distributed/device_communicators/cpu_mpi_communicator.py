@@ -127,15 +127,29 @@ class CpuMPICommunicator(DeviceCommunicatorBase):
 
         global_rank_tensor = torch.tensor([self.global_rank],
                                           dtype=torch.int32)
+
         group_ranks = torch.zeros(num_ranks, dtype=torch.int32)
         dist.all_gather_into_tensor(group_ranks,
                                     global_rank_tensor,
                                     group=self.cpu_group)
         group_ranks = group_ranks.tolist()
-        logger.info("group_ranks: %s", str(group_ranks))
+        logger.info("[%d] group_ranks: %s", self.global_rank, str(group_ranks))
+        # mpi_group = MPI.COMM_WORLD.group.Incl(group_ranks)
+        # self.mpi_group_comm = MPI.Intracomm.Create_from_group(mpi_group)
 
-        mpi_group = MPI.COMM_WORLD.group.Incl(group_ranks)
-        self.mpi_group_comm = MPI.Intracomm.Create_from_group(mpi_group)
+        min_rank_in_group = torch.tensor([self.global_rank], dtype=torch.int32)
+        dist.all_reduce(min_rank_in_group,
+                        op=dist.ReduceOp.MIN,
+                        group=self.cpu_group)
+        logger.info("[%d] min_rank_in_group: %d", self.global_rank,
+                    min_rank_in_group.item())
+        min_rank_in_group = min_rank_in_group.item()
+        self.mpi_group_comm = MPI.COMM_WORLD.Split(min_rank_in_group)
+        group_ranks_verify = torch.zeros(num_ranks, dtype=torch.int32)
+        self.mpi_group_comm.Allgather(global_rank_tensor, group_ranks_verify)
+        logger.info("[%d] group_ranks_verify: %s", self.global_rank,
+                    str(group_ranks_verify.tolist()))
+
         self.mpi_group_rank = self.mpi_group_comm.Get_rank()
         self.mpi_group_size = self.mpi_group_comm.Get_size()
         logger.info("CpuMPICommunicator initialized, rank: %d, world_size: %d",
