@@ -13,7 +13,7 @@ from torch import fx
 
 from vllm.utils import is_torch_equal_or_newer
 
-if is_torch_equal_or_newer("2.6"):
+if is_torch_equal_or_newer("2.6.0.dev"):
     from torch._inductor.custom_graph_pass import CustomGraphPass
 else:
     # CustomGraphPass is not present in 2.5 or lower, import our version
