@@ -426,7 +426,7 @@ def init_gloo_process_group(backend: Backend, prefix_store: PrefixStore,
     Stateless init ProcessGroup with gloo backend compatible with 
     different torch versions.
     """
-    if is_torch_equal_or_newer("2.6"):
+    if is_torch_equal_or_newer("2.6.0.dev"):
         pg = ProcessGroup(
             prefix_store,
             group_rank,
@@ -447,7 +447,7 @@ def init_gloo_process_group(backend: Backend, prefix_store: PrefixStore,
                                      timeout=timeout)
     backend_type = ProcessGroup.BackendType.GLOO
     device = torch.device("cpu")
-    if is_torch_equal_or_newer("2.6"):
+    if is_torch_equal_or_newer("2.6.0.dev"):
         # _set_default_backend is supported in torch >= 2.6
         pg._set_default_backend(backend_type)
     backend_class._set_sequence_number_for_group()

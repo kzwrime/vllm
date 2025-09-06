@@ -333,7 +333,7 @@ class InductorAdaptor(CompilerInterface):
                 return inductor_compiled_graph
 
             hijacked_compile_fx_inner = torch._inductor.compile_fx.compile_fx_inner  # noqa
-        elif torch.__version__ >= "2.6":
+        elif torch.__version__ >= "2.6.0.dev":
             # function renamed in 2.6
             original_load_name = None
 
@@ -420,7 +420,7 @@ class InductorAdaptor(CompilerInterface):
             # get hit.
             # TODO(zou3519): we're going to replace this all with
             # standalone_compile sometime.
-            if is_torch_equal_or_newer("2.6"):
+            if is_torch_equal_or_newer("2.6.0.dev"):
                 stack.enter_context(
                     torch._inductor.config.patch(fx_graph_remote_cache=False))
                 # InductorAdaptor (unfortunately) requires AOTAutogradCache
@@ -491,7 +491,7 @@ class InductorAdaptor(CompilerInterface):
                     "Inductor cache lookup failed. Please remove"
                     f"the cache directory and try again."  # noqa
                 )
-            elif torch.__version__ >= "2.6":
+            elif torch.__version__ >= "2.6.0.dev":
                 from torch._inductor.output_code import (
                     CompiledFxGraphConstantsWithGm)
                 constants = CompiledFxGraphConstantsWithGm(graph)
@@ -540,7 +540,7 @@ class InductorAdaptor(CompilerInterface):
         manually setting up internal contexts. But we also rely on non-public
         APIs which might not provide these guarantees.
         """
-        if is_torch_equal_or_newer("2.6"):
+        if is_torch_equal_or_newer("2.6.0.dev"):
             import torch._dynamo.utils
             return torch._dynamo.utils.get_metrics_context()
         else:
