@@ -279,7 +279,8 @@ class WorkerWrapperBase:
             raise e
 
     def shutdown(self):
-        self.worker.shutdown()
+        if self.worker is not None:
+            self.worker.shutdown()
 
     def __getattr__(self, attr):
         return getattr(self.worker, attr)
