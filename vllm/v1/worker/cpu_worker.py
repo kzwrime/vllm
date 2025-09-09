@@ -126,6 +126,15 @@ class CPUWorker(Worker):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
+        enable_warmup = True
+        vllm_disable_cpu_warmup = os.getenv("VLLM_DISABLE_CPU_WARMUP")
+        if vllm_disable_cpu_warmup is not None and \
+            vllm_disable_cpu_warmup.lower() in ["1", "true", "yes"]:
+            enable_warmup = False
+        if not enable_warmup:
+            logger.info("Skip model warmup as VLLM_DISABLE_WARMUP is set.")
+            return
+        logger.info("Start to warm up the model...")
         self.model_runner.warming_up_model()
 
     def _get_autobind_cpu_ids(
