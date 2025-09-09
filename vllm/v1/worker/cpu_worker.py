@@ -69,11 +69,17 @@ class CPUWorker(Worker):
         os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.split(
             ":")[-1]
 
+        world_rank_across_dp = (self.parallel_config.data_parallel_rank *
+                                self.parallel_config.world_size) + self.rank
+        world_size_across_dp = self.parallel_config.world_size_across_dp
+
         logger.info(
             ("rank: %d, local_rank: %d, world_size: %d, dist_backend: %s, "
-             "self.distributed_init_method: %s"), self.rank, self.local_rank,
-            self.parallel_config.world_size, current_platform.dist_backend,
-            self.distributed_init_method)
+             "self.distributed_init_method: %s, "
+             "world_rank_across_dp: %d, world_size_across_dp: %d"), self.rank,
+            self.local_rank, self.parallel_config.world_size,
+            current_platform.dist_backend, self.distributed_init_method,
+            world_rank_across_dp, world_size_across_dp)
 
         if current_platform.dist_backend_extra and \
                 current_platform.dist_backend_extra == "mpi":
@@ -81,17 +87,21 @@ class CPUWorker(Worker):
             mpi4py.rc.initialize = False
             mpi4py.rc.finalize = False
             from mpi4py import MPI
+
             MPI.Init()
             self.mpi_finalize = MPI.Finalize
             self.mpi_initialized = True
             self.mpi_world_comm = MPI.COMM_WORLD
-            assert self.mpi_world_comm.Get_rank() == self.rank, (
-                f"mpi_rank: {self.mpi_world_comm.Get_rank()} != "
-                f"rank: {self.rank}")
-            assert self.mpi_world_comm.Get_size() == \
-                self.parallel_config.world_size, (
-                    f"mpi_world_size: {self.mpi_world_comm.Get_size()} != "
-                    f"world_size: {self.parallel_config.world_size}")
+
+            mpi_rank = self.mpi_world_comm.Get_rank()
+            mpi_size = self.mpi_world_comm.Get_size()
+
+            assert mpi_rank == world_rank_across_dp, (
+                f"mpi_rank: {mpi_rank} != "
+                f"global_world_rank: {world_rank_across_dp}")
+            assert mpi_size == world_size_across_dp, (
+                f"mpi_world_size: {mpi_size} != "
+                f"world_size_across_dp: {world_size_across_dp}")
 
             import socket
             host_name = socket.gethostname()
