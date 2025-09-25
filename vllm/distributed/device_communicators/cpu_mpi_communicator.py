@@ -7,6 +7,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 from .base_device_communicator import DeviceCommunicatorBase
@@ -158,6 +159,16 @@ class CpuMPICommunicator(DeviceCommunicatorBase):
         assert self.mpi_group_rank == self.rank
         assert self.mpi_group_size == self.world_size
 
+        if self.use_all2all:
+            all2all_backend = envs.VLLM_ALL2ALL_BACKEND
+            if all2all_backend == "naive":
+                from .all2all import NaiveAll2AllManager
+                self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
+                logger.info("Using naive all2all manager.")
+            else:
+                raise ValueError(
+                    f"Unknown/Unsupported all2all backend: {all2all_backend}")
+
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
         # logger.info(f"all_reduce rank: {self.mpi_group_rank}, "
         #     f"input_.shape: {input_.shape}, input_.dtype: {input_.dtype}")
@@ -224,5 +235,23 @@ class CpuMPICommunicator(DeviceCommunicatorBase):
         NOTE: `dst` is the local rank of the destination rank.
         """
         raise NotImplementedError
+
+    def dispatch(
+            self, hidden_states: torch.Tensor,
+            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self.all2all_manager is not None
+        hidden_states, router_logits = self.all2all_manager.dispatch(
+            hidden_states, router_logits)
+        return hidden_states, router_logits
+
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert self.all2all_manager is not None
+        hidden_states = self.all2all_manager.combine(hidden_states)
+        return hidden_states
+
+    def destroy(self):
+        if self.all2all_manager is not None:
+            self.all2all_manager.destroy()
+            self.all2all_manager = None
 
     pass

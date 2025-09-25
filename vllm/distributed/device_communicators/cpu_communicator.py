@@ -7,11 +7,15 @@ from typing import Any, Optional, Union
 import torch
 from torch.distributed import ProcessGroup
 
+import vllm.envs as envs
 from vllm.distributed.utils import pickle
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 
 from .base_device_communicator import DeviceCommunicatorBase
+
+logger = init_logger(__name__)
 
 
 class CpuCommunicator(DeviceCommunicatorBase):
@@ -30,6 +34,16 @@ class CpuCommunicator(DeviceCommunicatorBase):
                     "init_shm_manager") and (unique_name.startswith("tp")
                                              or unique_name.startswith("pp")):
             self.dist_module = _CPUSHMDistributed(self)
+
+        if self.use_all2all:
+            all2all_backend = envs.VLLM_ALL2ALL_BACKEND
+            if all2all_backend == "naive":
+                from .all2all import NaiveAll2AllManager
+                self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
+                logger.info("Using naive all2all manager.")
+            else:
+                raise ValueError(
+                    f"Unknown/Unsupported all2all backend: {all2all_backend}")
 
     def all_reduce(self, input_):
         self.dist_module.all_reduce(input_, group=self.device_group)
@@ -108,6 +122,24 @@ class CpuCommunicator(DeviceCommunicatorBase):
         src: int,
     ) -> dict[str, Union[torch.Tensor, Any]]:
         return self.dist_module.recv_tensor_dict(src)
+
+    def dispatch(
+            self, hidden_states: torch.Tensor,
+            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self.all2all_manager is not None
+        hidden_states, router_logits = self.all2all_manager.dispatch(
+            hidden_states, router_logits)
+        return hidden_states, router_logits
+
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert self.all2all_manager is not None
+        hidden_states = self.all2all_manager.combine(hidden_states)
+        return hidden_states
+
+    def destroy(self):
+        if self.all2all_manager is not None:
+            self.all2all_manager.destroy()
+            self.all2all_manager = None
 
 
 class _CPUSHMDistributed:
