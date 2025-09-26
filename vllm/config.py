@@ -1876,7 +1876,8 @@ class LoadConfig:
             self.ignore_patterns = ["original/**/*"]
 
 
-DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
+DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher",
+                                     "mp_rpc"]
 
 
 @config
@@ -2194,14 +2195,14 @@ class ParallelConfig:
         from vllm.executor.executor_base import ExecutorBase
         from vllm.platforms import current_platform
         if self.distributed_executor_backend not in (
-                "ray", "mp", "uni",
+                "ray", "mp", "uni", "mp_rpc",
                 "external_launcher", None) and not (isinstance(
                     self.distributed_executor_backend, type) and issubclass(
                         self.distributed_executor_backend, ExecutorBase)):
             raise ValueError(
                 "Unrecognized distributed executor backend "
                 f"{self.distributed_executor_backend}. Supported "
-                "values are 'ray', 'mp' 'uni', 'external_launcher' or"
+                "values are 'ray', 'mp' 'uni', 'external_launcher', 'mp_rpc' or"
                 " custom ExecutorBase subclass.")
         if self.use_ray:
             from vllm.executor import ray_utils

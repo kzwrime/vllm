@@ -179,6 +179,7 @@ class CpuPlatform(Platform):
         if (parallel_config.world_size > 1
                 and parallel_config.distributed_executor_backend is not None
                 and parallel_config.distributed_executor_backend != "mp"
+                and parallel_config.distributed_executor_backend != "mp_rpc"
                 and parallel_config.distributed_executor_backend
                 != "external_launcher"):
             logger.warning(("%s is not supported on CPU, fallback to mp "
