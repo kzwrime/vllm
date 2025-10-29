@@ -36,8 +36,6 @@ from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
-REMOTE_WORKER_READY_BASE_PORT = 28888
-
 
 class MultiprocRPCExecutor(Executor):
 
@@ -84,7 +82,7 @@ class MultiprocRPCExecutor(Executor):
             host_ip = "0.0.0.0"
             display_ip = get_loopback_ip()
             for rank in range(self.world_size):
-                port = REMOTE_WORKER_READY_BASE_PORT + rank
+                port = envs.VLLM_MP_RPC_READY_BASE_PORT + rank
                 server_socket = socket.socket(socket.AF_INET,
                                               socket.SOCK_STREAM)
                 server_socket.setsockopt(socket.SOL_SOCKET,
@@ -102,7 +100,7 @@ class MultiprocRPCExecutor(Executor):
                         self.world_size)
 
             for rank, sock in enumerate(ready_sockets):
-                port = REMOTE_WORKER_READY_BASE_PORT + rank
+                port = envs.VLLM_MP_RPC_READY_BASE_PORT + rank
                 logger.info("  - Worker Rank %d should connect to %s:%d", rank,
                             display_ip, port)
 
