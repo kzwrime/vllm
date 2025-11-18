@@ -424,7 +424,8 @@ class WorkerProc:
             input_shm_handle, self.worker.rank)
 
         # Initializes a message queue for sending the model output
-        self.worker_response_mq = MessageQueue(1, 1)
+        # TODO: dynamically detect the number of local readers
+        self.worker_response_mq = MessageQueue(1, n_local_reader=0)
 
         # Initialize device and loads weights
         self.worker.init_device()
