@@ -465,8 +465,45 @@ class WorkerProc:
 
         ready_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
+        # Set connection timeout parameters
+        max_retry_time = 300  # 300 seconds maximum wait time
+        retry_interval = 60  # 60 seconds between retries
+        start_time = time.time()
+
         try:
-            ready_socket.connect((executor_addr, ready_port))
+            # Add connection retry logic with logging
+            connected = False
+            last_log_time = 0.0
+
+            while not connected and (time.time() -
+                                     start_time) < max_retry_time:
+                try:
+                    ready_socket.connect((executor_addr, ready_port))
+                    connected = True
+                except ConnectionRefusedError:
+                    current_time = time.time()
+                    if current_time - last_log_time >= retry_interval:
+                        logger.debug(
+                            "Waiting for executor connection... "
+                            "Executor: %s:%d, Time elapsed: %ds",
+                            executor_addr, ready_port,
+                            int(current_time - start_time))
+                        last_log_time = current_time
+
+                    # Check if we should continue waiting
+                    if (time.time() - start_time) < max_retry_time:
+                        time.sleep(
+                            retry_interval)  # Sleep briefly before retry
+                    else:
+                        raise ConnectionError(
+                            f"Failed to connect to executor at "
+                            f"{executor_addr}:{ready_port} after "
+                            f"{max_retry_time} seconds") from None
+
+            if not connected:
+                raise ConnectionError(
+                    f"Unable to establish connection to executor "
+                    f"after {max_retry_time} seconds")
 
             with ready_socket:
                 # 1. RECEIVE config from executor
