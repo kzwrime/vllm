@@ -610,7 +610,7 @@ def launch_core_engines(
     local_engine_count = parallel_config.data_parallel_size_local
     local_start_index = parallel_config.data_parallel_rank_local
     dp_rank = parallel_config.data_parallel_rank
-    host = parallel_config.data_parallel_master_ip
+    host = parallel_config.data_parallel_rpc_ip
     local_engines_only = (parallel_config.data_parallel_hybrid_lb
                           or parallel_config.data_parallel_external_lb)
 

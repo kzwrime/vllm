@@ -102,7 +102,7 @@ def run_headless(args: argparse.Namespace):
         raise ValueError("data_parallel_size_local must be > 0 in "
                          "headless mode")
 
-    host = parallel_config.data_parallel_master_ip
+    host = parallel_config.data_parallel_rpc_ip
     port = engine_args.data_parallel_rpc_port  # add to config too
     handshake_address = get_tcp_uri(host, port)
 

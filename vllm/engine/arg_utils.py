@@ -325,6 +325,7 @@ class EngineArgs:
     data_parallel_start_rank: Optional[int] = None
     data_parallel_size_local: Optional[int] = None
     data_parallel_address: Optional[str] = None
+    data_parallel_rpc_ip: Optional[str] = None
     data_parallel_rpc_port: Optional[int] = None
     data_parallel_hybrid_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
@@ -677,6 +678,11 @@ class EngineArgs:
                                     'to run on this node.')
         parallel_group.add_argument('--data-parallel-address',
                                     '-dpa',
+                                    type=str,
+                                    help='Address of data parallel cluster '
+                                    'node with dp 0.')
+        parallel_group.add_argument('--data-parallel-rpc-ip',
+                                    '-dpi',
                                     type=str,
                                     help='Address of data parallel cluster '
                                     'head-node.')
@@ -1280,6 +1286,11 @@ class EngineArgs:
         else:
             data_parallel_address = self.data_parallel_address
 
+        if self.data_parallel_rpc_ip is None:
+            data_parallel_rpc_ip = data_parallel_address
+        else:
+            data_parallel_rpc_ip = self.data_parallel_rpc_ip
+
         # This port is only used when there are remote data parallel engines,
         # otherwise the local IPC transport is used.
         data_parallel_rpc_port = self.data_parallel_rpc_port if (
@@ -1321,6 +1332,7 @@ class EngineArgs:
             data_parallel_external_lb=data_parallel_external_lb,
             data_parallel_size_local=data_parallel_size_local,
             data_parallel_master_ip=data_parallel_address,
+            data_parallel_rpc_ip=data_parallel_rpc_ip,
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
