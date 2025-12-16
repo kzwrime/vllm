@@ -19,6 +19,7 @@ ALLOWED_FILES = {
     # pickle
     'vllm/v1/serial_utils.py',
     'vllm/v1/executor/multiproc_executor.py',
+    'vllm/v1/executor/multiproc_rpc_executor.py',
     'vllm/multimodal/hasher.py',
     'vllm/transformers_utils/config.py',
     'vllm/model_executor/models/registry.py',

@@ -31,7 +31,8 @@ else:
 logger = init_logger(__name__)
 
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
-DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
+DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher",
+                                     "mp_rpc"]
 
 
 @config

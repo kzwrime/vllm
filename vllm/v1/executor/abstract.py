@@ -46,6 +46,10 @@ class Executor(ExecutorBase):
         elif distributed_executor_backend == "mp":
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor
             executor_class = MultiprocExecutor
+        elif distributed_executor_backend == "mp_rpc":
+            from vllm.v1.executor.multiproc_rpc_executor import (
+                MultiprocRPCExecutor)
+            executor_class = MultiprocRPCExecutor
         elif distributed_executor_backend == "uni":
             executor_class = UniProcExecutor
         elif distributed_executor_backend == "external_launcher":
