@@ -165,6 +165,10 @@ class CpuMPICommunicator(DeviceCommunicatorBase):
                 from .all2all import NaiveAll2AllManager
                 self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
                 logger.info("Using naive all2all manager.")
+            elif all2all_backend == "allgather_reducescatter":
+                from .all2all import AgRsAll2AllManager
+                self.all2all_manager = AgRsAll2AllManager(self.device_group)
+                logger.info("Using AllGather-ReduceScatter all2all manager.")
             else:
                 raise ValueError(
                     f"Unknown/Unsupported all2all backend: {all2all_backend}")

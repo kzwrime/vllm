@@ -39,8 +39,12 @@ class CpuCommunicator(DeviceCommunicatorBase):
             all2all_backend = envs.VLLM_ALL2ALL_BACKEND
             if all2all_backend == "naive":
                 from .all2all import NaiveAll2AllManager
-                self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
+                self.all2all_manager = NaiveAll2AllManager(self.device_group)
                 logger.info("Using naive all2all manager.")
+            elif all2all_backend == "allgather_reducescatter":
+                from .all2all import AgRsAll2AllManager
+                self.all2all_manager = AgRsAll2AllManager(self.device_group)
+                logger.info("Using AllGather-ReduceScatter all2all manager.")
             else:
                 raise ValueError(
                     f"Unknown/Unsupported all2all backend: {all2all_backend}")
