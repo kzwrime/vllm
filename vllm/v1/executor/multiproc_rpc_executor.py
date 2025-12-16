@@ -101,6 +101,10 @@ class MultiprocRPCExecutor(Executor):
                         shared_worker_lock=shared_worker_lock,
                     ))
 
+            distributed_init_method = unready_workers[0].ready_pipe.recv(1024)
+            for unready_worker in unready_workers:
+                unready_worker.ready_pipe.sendall(distributed_init_method)
+
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
             self.workers = WorkerProc.wait_for_ready(unready_workers)
@@ -668,9 +672,16 @@ class WorkerProc:
                         os.environ[k] = v
 
                 vllm_config = config_data["vllm_config"]
-                distributed_init_method = config_data[
-                    "distributed_init_method"]
                 input_shm_handle = config_data["input_shm_handle"]
+
+                if rank == 0:
+                    distributed_init_method = get_distributed_init_method(
+                        get_loopback_ip(), get_open_port())
+                    ready_socket.sendall(
+                        distributed_init_method.encode('utf-8'))
+
+                distributed_init_method = ready_socket.recv(1024).decode(
+                    encoding='utf-8')
 
                 worker = WorkerProc(vllm_config, local_rank, rank,
                                     distributed_init_method, input_shm_handle)
