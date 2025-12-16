@@ -1,0 +1,5 @@
+*
+!.gitignore
+!serve_mp_rpc
+!*_template.sh
+!common.sh
