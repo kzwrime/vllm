@@ -178,6 +178,7 @@ class CpuPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         if (parallel_config.world_size > 1
                 and parallel_config.distributed_executor_backend is not None
+                and parallel_config.distributed_executor_backend != "mp_rpc"
                 and parallel_config.distributed_executor_backend != "mp"):
             logger.warning(("%s is not supported on CPU, fallback to mp "
                             "distributed executor backend."),
