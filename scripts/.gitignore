@@ -3,3 +3,4 @@
 !serve_mp_rpc
 !*_template.sh
 !common.sh
+!mpi_get_rank_size.sh
