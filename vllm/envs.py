@@ -206,6 +206,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: Optional[str] = None
     VLLM_USE_FBGEMM: bool = False
     VLLM_MP_RPC_READY_BASE_PORT: int = 28888
+    VLLM_CPU_USE_MPI: bool = False
 
 
 def get_default_cache_root():
@@ -1480,6 +1481,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Used to get READY_BASE_PORT in multiproc_rpc_executor
     "VLLM_MP_RPC_READY_BASE_PORT":
     lambda: int(os.getenv("VLLM_MP_RPC_READY_BASE_PORT", "28888")),
+
+    "VLLM_CPU_USE_MPI":
+    lambda: bool(os.getenv("VLLM_CPU_USE_MPI", "0")),
 }
 
 # --8<-- [end:env-vars-definition]

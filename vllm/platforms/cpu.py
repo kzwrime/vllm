@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
+from vllm.envs import VLLM_CPU_USE_MPI
 from vllm.logger import init_logger
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
@@ -70,7 +71,8 @@ class CpuPlatform(Platform):
     dispatch_key: str = "CPU"
     dist_backend: str = "gloo"
     device_control_env_var = "CPU_VISIBLE_MEMORY_NODES"
-    dist_backend_extra: str = "mpi"
+    if VLLM_CPU_USE_MPI:
+        dist_backend_extra: str = "mpi"
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
