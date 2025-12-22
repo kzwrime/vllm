@@ -23,7 +23,7 @@ echo "--- 📝 vLLM 服务配置参数检查与设置 ---"
 echo "--- 必需参数 ---"
 check_and_print_env "RANK"
 check_and_print_env "SIZE"
-check_and_print_env "ExecutorIP"
+
 check_and_print_env "USER_VLLM_MPC_SIZE"
 check_and_print_env "USER_VLLM_MP_RPC_WORKER_PER_NODE"
 
@@ -48,6 +48,8 @@ fi
 DP_RANK=$((RANK / USER_VLLM_MPC_SIZE))
 MPC_RANK=$((RANK % USER_VLLM_MPC_SIZE))
 MPC_INNER_RANK=$((RANK % USER_VLLM_MP_RPC_WORKER_PER_NODE))
+
+check_and_print_env "ExecutorIP"
 
 export VLLM_MP_RPC_READY_BASE_PORT=$((28888 + DP_RANK * USER_VLLM_MPC_SIZE))
 
