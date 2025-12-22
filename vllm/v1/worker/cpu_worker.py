@@ -88,7 +88,8 @@ class CPUWorker(Worker):
             mpi4py.rc.finalize = False
             from mpi4py import MPI
 
-            MPI.Init()
+            if not MPI.Is_initialized():
+                MPI.Init()
             self.mpi_finalize = MPI.Finalize
             self.mpi_initialized = True
             self.mpi_world_comm = MPI.COMM_WORLD

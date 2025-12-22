@@ -1,11 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
+import os
+import socket
 
-import vllm.envs as envs
-from vllm.utils import get_loopback_ip
+host_name = socket.gethostname()
+host_ip = socket.gethostbyname(host_name)
+print(f"{host_name}@{host_ip}", flush=True)
+
+# import mpi before import vllm
+if bool(os.getenv("VLLM_CPU_USE_MPI", "0")):
+    from mpi4py import MPI
+    print(
+        f"[rank={MPI.COMM_WORLD.Get_rank()}][{MPI.Get_processor_name()}] "
+        f"MPI.Is_initialized()={MPI.Is_initialized()}",
+        flush=True)
+
+import vllm.envs as envs  # noqa: E402
+from vllm.utils import get_loopback_ip  # noqa: E402
 # Assume multiproc_executor is in the same path or PYTHONPATH
-from vllm.v1.executor.multiproc_rpc_executor import WorkerProc
+from vllm.v1.executor.multiproc_rpc_executor import WorkerProc  # noqa: E402
 
 
 def main():
