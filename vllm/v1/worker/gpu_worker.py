@@ -486,6 +486,25 @@ class Worker(WorkerBase):
             if self.local_rank == 0:
                 print(self.profiler.key_averages().table(
                     sort_by="self_cuda_time_total"))
+                if envs.VLLM_TORCH_PROFILER_DIR:
+                    from datetime import datetime
+                    timestamp = datetime.timestamp(datetime.now())
+                    output_csv_path = (f"{envs.VLLM_TORCH_PROFILER_DIR}/"
+                                       f"profile_{timestamp}.csv")
+
+                    key_averages_events = self.profiler.key_averages()
+                    headers = list(vars(key_averages_events[0]).keys())
+
+                    import csv
+                    with open(output_csv_path, "w", newline="") as csvfile:
+                        writer = csv.writer(csvfile)
+                        writer.writerow(headers)
+                        for event in key_averages_events:
+                            writer.writerow(vars(event).values())
+                    print(f"Profiler results have been manually"
+                          f" saved to {output_csv_path}")
+
+                    key_averages_events = self.profiler.key_averages()
 
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1, uniform_decode=True)
