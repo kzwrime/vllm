@@ -1483,7 +1483,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_MP_RPC_READY_BASE_PORT", "28888")),
 
     "VLLM_CPU_USE_MPI":
-    lambda: bool(os.getenv("VLLM_CPU_USE_MPI", "0")),
+    lambda: bool(int(os.getenv("VLLM_CPU_USE_MPI", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]

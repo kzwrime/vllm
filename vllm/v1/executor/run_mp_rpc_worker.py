@@ -9,7 +9,7 @@ host_ip = socket.gethostbyname(host_name)
 print(f"{host_name}@{host_ip}", flush=True)
 
 # import mpi before import vllm
-if bool(os.getenv("VLLM_CPU_USE_MPI", "0")):
+if bool(int(os.getenv("VLLM_CPU_USE_MPI", "0"))):
     from mpi4py import MPI
     print(
         f"[rank={MPI.COMM_WORLD.Get_rank()}][{MPI.Get_processor_name()}] "
