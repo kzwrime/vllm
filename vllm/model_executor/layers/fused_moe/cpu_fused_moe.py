@@ -264,6 +264,14 @@ class CPUFusedMOE:
         # Ref code from https://github.com/sgl-project/sglang/blob/716e682721397df103f347d22da8bd46c6016dab/python/sglang/srt/layers/moe/fused_moe_native.py#L53
         len_experts = global_num_experts
 
+        if expert_map is not None:
+            assert custom_routing_function is None
+            assert not use_grouped_topk
+            assert expert_map.shape[0] == global_num_experts
+
+            num_local_experts = (expert_map != -1).sum()
+            assert num_local_experts == layer.w13_weight.shape[0]
+
         cnts = topk_ids.new_zeros((topk_ids.shape[0], len_experts))
         cnts.scatter_(1, topk_ids.to(torch.int64), 1)
         tokens_per_expert = cnts.sum(dim=0)
@@ -280,12 +288,20 @@ class CPUFusedMOE:
                 continue
             tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
 
-            layer_w13_weight = layer.w13_weight[i]
-            layer_w2_weight = layer.w2_weight[i]
+            local_index = i
+            if expert_map is not None:
+                local_index = expert_map[i]
 
-            gate_up = F.linear(tokens_for_this_expert, layer_w13_weight)
-            gate_up = silu_and_mul(gate_up)
-            expert_out = F.linear(gate_up, layer_w2_weight)
+            if local_index == -1:
+                expert_out = torch.zeros_like(tokens_for_this_expert)
+            else:
+                layer_w13_weight = layer.w13_weight[local_index]
+                layer_w2_weight = layer.w2_weight[local_index]
+
+                gate_up = F.linear(tokens_for_this_expert, layer_w13_weight)
+                gate_up = silu_and_mul(gate_up)
+                expert_out = F.linear(gate_up, layer_w2_weight)
+
             outputs.append(expert_out)
             start_idx = end_idx
 
