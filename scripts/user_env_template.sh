@@ -26,9 +26,10 @@ export USER_VLLM_ENFORCE_EAGER=1
 export USER_VLLM_ENABLE_EXPERT_PARALLEL=0
 
 export VLLM_CPU_USE_MPI=0
-if [[ -z "$VLLM_CPU_USE_MPI" || "$VLLM_CPU_USE_MPI" != "1" ]]; then
-    export VLLM_ALL2ALL_BACKEND=naive
-fi
+# if [[ -z "$VLLM_CPU_USE_MPI" || "$VLLM_CPU_USE_MPI" != "1" ]]; then
+#     export VLLM_ALL2ALL_BACKEND=naive
+# fi
+export VLLM_ALL2ALL_BACKEND=naive # both gloo and mpi only support naive all2all now
 
 export VLLM_LOOPBACK_IP=$(hostname -I | awk '{print $1}')
 # export VLLM_LOOPBACK_IP=$(ifconfig eth0 | grep "inet " | awk '{print ^C}')
