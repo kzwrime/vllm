@@ -15,6 +15,7 @@ if bool(int(os.getenv("VLLM_CPU_USE_MPI", "0"))):
         f"[rank={MPI.COMM_WORLD.Get_rank()}][{MPI.Get_processor_name()}] "
         f"MPI.Is_initialized()={MPI.Is_initialized()}",
         flush=True)
+    MPI.COMM_WORLD.Barrier()
 
 import vllm.envs as envs  # noqa: E402
 from vllm.utils import get_loopback_ip  # noqa: E402
@@ -46,6 +47,8 @@ def main():
         "executor_addr": args.executor_ip,
         "ready_port": envs.VLLM_MP_RPC_READY_BASE_PORT + args.rank
     }
+
+    print(f"[rank={args.rank}] starting worker", flush=True)
 
     # Call the modified worker entrypoint
     WorkerProc.worker_main(**kwargs)
