@@ -25,5 +25,5 @@ curl http://localhost:${USER_VLLM_PORT}/v1/completions \
 "model": "'"${USER_VLLM_MODEL}"'",
 "prompt": "San Francisco is a",
 "max_tokens": 8,
-"temperature": 0
+"temperature": 0.1
 }'
