@@ -37,6 +37,8 @@ check_and_print_env "USER_VLLM_DATA_PARALLEL_RPC_IP"
 check_and_print_env "USER_VLLM_DATA_PARALLEL_RPC_PORT"
 check_and_print_env "USER_VLLM_PORT"
 check_and_print_env "VLLM_LOOPBACK_IP"
+check_and_print_env "VLLM_CPU_USE_MPI"
+check_and_print_env "VLLM_OPTIONAL_ARGS"
 
 # TODO 检查 PP_SIZE * TP_SIZE = USER_VLLM_MPC_SIZE
 
@@ -57,7 +59,7 @@ export VLLM_MP_RPC_READY_BASE_PORT=$((28888 + DP_RANK * USER_VLLM_MPC_SIZE))
 # 启动 MP RPC Worker
 echo "[RANK=$RANK][DP_RANK=$DP_RANK][MPC_RANK=$MPC_RANK] Starting vLLM mp_rpc_worker"
 (
-    python3 "$SCRIPT_DIR/../vllm/v1/executor/run_mp_rpc_worker.py" \
+    VLLM_LOGGING_LEVEL=${USER_VLLM_LOGGING_LEVEL} python3 "$SCRIPT_DIR/../vllm/v1/executor/run_mp_rpc_worker.py" \
       --rank $MPC_RANK \
       --local-rank $MPC_INNER_RANK \
       --executor-ip ${ExecutorIP} | tee logs/vllm_worker_log_rank${RANK}.txt
@@ -65,7 +67,7 @@ echo "[RANK=$RANK][DP_RANK=$DP_RANK][MPC_RANK=$MPC_RANK] Starting vLLM mp_rpc_wo
 
 # 如果 RANK 是 TP*PP 组的第一个，启动 VLLM 服务
 if [ $MPC_RANK -eq 0 ]; then
-    sleep 20
+    sleep 30
     echo "[RANK=$RANK][DP_RANK=$DP_RANK] Starting vLLM serve"
     (
         VLLM_LOGGING_LEVEL=${USER_VLLM_LOGGING_LEVEL} vllm serve ${USER_VLLM_MODEL} \
