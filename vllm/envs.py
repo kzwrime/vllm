@@ -256,6 +256,7 @@ if TYPE_CHECKING:
     VLLM_USE_MP_RPC_WORKERS: bool = False
     VLLM_MP_RPC_READY_BASE_PORT: int = 28888
     VLLM_USE_CPU_SHM_DIST: bool = True
+    VLLM_USE_XCPU_LINEAR: bool = False
 
 
 def get_default_cache_root():
@@ -1622,6 +1623,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Use _CPUSHMDistributed in CpuCommunicator
     "VLLM_USE_CPU_SHM_DIST": lambda: bool(int(os.getenv("VLLM_USE_CPU_SHM_DIST", "1"))),
+    "VLLM_USE_XCPU_LINEAR": lambda: bool(int(os.getenv("VLLM_USE_XCPU_LINEAR", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]

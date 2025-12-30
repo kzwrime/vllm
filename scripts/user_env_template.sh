@@ -21,6 +21,8 @@ export VLLM_USE_CPU_SHM_DIST=0
 export VLLM_LOOPBACK_IP=$(hostname -I | awk '{print $1}')
 # export VLLM_LOOPBACK_IP=$(ifconfig eth0 | grep "inet " | awk '{print ^C}')
 
+export VLLM_USE_XCPU_LINEAR=0
+
 export VLLM_CPU_USE_MPI=0
 
 

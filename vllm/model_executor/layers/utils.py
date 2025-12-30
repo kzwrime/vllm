@@ -210,6 +210,14 @@ def dispatch_cpu_unquantized_gemm(
         if remove_weight:
             layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
         return
+    elif envs.VLLM_USE_XCPU_LINEAR:
+        import torch_xcpu
+
+        # has_bias = getattr(layer, "bias", None) is not None
+        layer.cpu_linear = lambda x, weight, bias: torch_xcpu.ops.linear(
+            x, weight, bias
+        )
+        return
     elif (
         ops._supports_onednn
         and current_platform.get_cpu_architecture() != CpuArchEnum.POWERPC
