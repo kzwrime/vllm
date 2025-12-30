@@ -207,6 +207,7 @@ if TYPE_CHECKING:
     VLLM_USE_FBGEMM: bool = False
     VLLM_MP_RPC_READY_BASE_PORT: int = 28888
     VLLM_CPU_USE_MPI: bool = False
+    VLLM_USE_XCPU_LINEAR: bool = False
 
 
 def get_default_cache_root():
@@ -1484,6 +1485,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     "VLLM_CPU_USE_MPI":
     lambda: bool(int(os.getenv("VLLM_CPU_USE_MPI", "0"))),
+
+    "VLLM_USE_XCPU_LINEAR":
+    lambda: bool(int(os.getenv("VLLM_USE_XCPU_LINEAR", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]

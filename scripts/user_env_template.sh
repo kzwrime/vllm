@@ -33,6 +33,8 @@ export VLLM_ALL2ALL_BACKEND=naive # both gloo and mpi only support naive all2all
 export VLLM_LOOPBACK_IP=$(hostname -I | awk '{print $1}')
 # export VLLM_LOOPBACK_IP=$(ifconfig eth0 | grep "inet " | awk '{print ^C}')
 
+export VLLM_USE_XCPU_LINEAR=0
+
 _VLLM_OPTIONAL_ARGS=" "
 # _VLLM_OPTIONAL_ARGS+=" --load-format dummy"
 # _VLLM_OPTIONAL_ARGS+=" --max-num-seqs 8"
