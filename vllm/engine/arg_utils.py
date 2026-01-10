@@ -481,6 +481,7 @@ class EngineArgs:
     data_parallel_start_rank: int | None = None
     data_parallel_size_local: int | None = None
     data_parallel_address: str | None = None
+    data_parallel_rpc_ip: str | None = None
     data_parallel_rpc_port: int | None = None
     data_parallel_hybrid_lb: bool = False
     data_parallel_external_lb: bool = False
@@ -1060,6 +1061,12 @@ class EngineArgs:
         parallel_group.add_argument(
             "--data-parallel-address",
             "-dpa",
+            type=str,
+            help="Address of data parallel cluster head-node.",
+        )
+        parallel_group.add_argument(
+            "--data-parallel-rpc-ip",
+            "-dpi",
             type=str,
             help="Address of data parallel cluster head-node.",
         )
@@ -2084,6 +2091,11 @@ class EngineArgs:
         else:
             data_parallel_address = self.data_parallel_address
 
+        if self.data_parallel_rpc_ip is None:
+            data_parallel_rpc_ip = data_parallel_address
+        else:
+            data_parallel_rpc_ip = self.data_parallel_rpc_ip
+
         # This port is only used when there are remote data parallel engines,
         # otherwise the local IPC transport is used.
         data_parallel_rpc_port = (
@@ -2111,6 +2123,7 @@ class EngineArgs:
             distributed_timeout_seconds=self.distributed_timeout_seconds,
             cpu_distributed_timeout_seconds=self.cpu_distributed_timeout_seconds,
             data_parallel_master_ip=data_parallel_address,
+            data_parallel_rpc_ip=data_parallel_rpc_ip,
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
