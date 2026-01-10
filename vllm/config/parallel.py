@@ -156,6 +156,8 @@ class ParallelConfig:
     ``__post_init__`` further bounds this by ``data_parallel_size``."""
     data_parallel_rank_local: int | None = None
     """Local rank of the data parallel group, set only in SPMD mode."""
+    data_parallel_rpc_ip: str = ""
+    """IP of the data parallel API/head. Defaults to the DP master IP."""
     data_parallel_master_ip: str = "127.0.0.1"
     """IP of the data parallel master."""
     data_parallel_rpc_port: int = Field(default=29550, ge=1, le=65535)
@@ -891,6 +893,7 @@ class ParallelConfig:
             "data_parallel_external_lb",
             "data_parallel_hybrid_lb",
             "data_parallel_master_ip",
+            "data_parallel_rpc_ip",
             "data_parallel_master_port",
             "_data_parallel_master_port_list",
             "_coord_store_port",
@@ -999,6 +1002,9 @@ class ParallelConfig:
                     "Offline data parallel mode is not supported/useful"
                     " for dense models."
                 )
+
+        if not self.data_parallel_rpc_ip:
+            self.data_parallel_rpc_ip = self.data_parallel_master_ip
 
         max_dp_size = self.elastic_ep_max_dp_size
         self.elastic_ep_max_dp_size = (
