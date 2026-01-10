@@ -810,7 +810,7 @@ def get_engine_zmq_addresses(
     local_engine_count = parallel_config.data_parallel_size_local
     local_start_index = parallel_config.data_parallel_rank_local
     dp_size = parallel_config.data_parallel_size
-    host = parallel_config.data_parallel_master_ip
+    host = parallel_config.data_parallel_rpc_ip
     local_engines_only = parallel_config.local_engines_only
 
     # In offline mode there is an LLM instance per DP rank and
