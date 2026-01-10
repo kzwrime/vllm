@@ -132,7 +132,7 @@ def run_headless(args: argparse.Namespace):
         executor.start_worker_monitor(inline=True)
         return
 
-    host = parallel_config.data_parallel_master_ip
+    host = parallel_config.data_parallel_rpc_ip
     port = parallel_config.data_parallel_rpc_port
     handshake_address = get_tcp_uri(host, port)
 

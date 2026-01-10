@@ -111,6 +111,8 @@ class ParallelConfig:
     data_parallel_rank_local: int | None = None
     """Local rank of the data parallel group,
     set only in SPMD mode."""
+    data_parallel_rpc_ip: str = "127.0.0.1"
+    """IP of the data parallel head."""
     data_parallel_master_ip: str = "127.0.0.1"
     """IP of the data parallel master."""
     data_parallel_rpc_port: int = 29550

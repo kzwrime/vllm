@@ -61,13 +61,15 @@ class DPCoordinator:
         dp_size = parallel_config.data_parallel_size
         assert dp_size > 1, "Coordinator only used for data parallel"
 
-        host = parallel_config.data_parallel_master_ip
+        host = parallel_config.data_parallel_rpc_ip
         external_lb = parallel_config.data_parallel_external_lb
         hybrid_lb = parallel_config.data_parallel_hybrid_lb
 
         # Assume coordinator is colocated with front-end procs when not in
         # either external or hybrid DP LB mode.
-        local_only = not (external_lb or hybrid_lb)
+        local_only = not (external_lb or hybrid_lb or
+                          (parallel_config.data_parallel_rpc_ip
+                           != parallel_config.data_parallel_master_ip))
         front_publish_address = get_engine_client_zmq_addr(
             local_only=local_only, host=host
         )
