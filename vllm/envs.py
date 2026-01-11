@@ -146,6 +146,7 @@ if TYPE_CHECKING:
     VLLM_DP_SIZE: int = 1
     VLLM_USE_STANDALONE_COMPILE: bool = True
     VLLM_DP_MASTER_IP: str = ""
+    VLLM_DP_MASTER_WORKER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
     VLLM_ENABLE_MOE_DP_CHUNK: bool = True
@@ -252,6 +253,9 @@ if TYPE_CHECKING:
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
+    VLLM_USE_MP_RPC_WORKERS: bool = False
+    VLLM_MP_RPC_READY_BASE_PORT: int = 28888
+    VLLM_USE_CPU_SHM_DIST: bool = True
 
 
 def get_default_cache_root():
@@ -1097,6 +1101,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DP_SIZE": lambda: int(os.getenv("VLLM_DP_SIZE", "1")),
     # IP address of the master node in the data parallel setting
     "VLLM_DP_MASTER_IP": lambda: os.getenv("VLLM_DP_MASTER_IP", "127.0.0.1"),
+    # IP address of the master worker node in the data parallel setting
+    "VLLM_DP_MASTER_WORKER_IP": lambda: os.getenv("VLLM_DP_MASTER_WORKER_IP", ""),
     # Port of the master node in the data parallel setting
     "VLLM_DP_MASTER_PORT": lambda: int(os.getenv("VLLM_DP_MASTER_PORT", "0")),
     # In the context of executing MoE models with Data-Parallel, Expert-Parallel
@@ -1606,6 +1612,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
+    # Use multiprocess RPC workers in multiproc_rpc_executor
+    "VLLM_USE_MP_RPC_WORKERS": lambda: bool(
+        int(os.getenv("VLLM_USE_MP_RPC_WORKERS", "0"))
+    ),
+    # Used to get READY_BASE_PORT in multiproc_rpc_executor
+    "VLLM_MP_RPC_READY_BASE_PORT": lambda: int(
+        os.getenv("VLLM_MP_RPC_READY_BASE_PORT", "28888")
+    ),
+    # Use _CPUSHMDistributed in CpuCommunicator
+    "VLLM_USE_CPU_SHM_DIST": lambda: bool(int(os.getenv("VLLM_USE_CPU_SHM_DIST", "1"))),
 }
 
 # --8<-- [end:env-vars-definition]
@@ -1690,6 +1706,7 @@ def compile_factors() -> dict[str, object]:
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
         "VLLM_DP_MASTER_IP",
+        "VLLM_DP_MASTER_WORKER_IP",
         "VLLM_DP_MASTER_PORT",
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
         "VLLM_CI_USE_S3",

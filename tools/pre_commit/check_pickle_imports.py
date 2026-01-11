@@ -38,6 +38,7 @@ ALLOWED_FILES = {
     "benchmarks/cutlass_benchmarks/sparse_benchmarks.py",
     # cloudpickle
     "vllm/v1/executor/multiproc_executor.py",
+    "vllm/v1/executor/multiproc_rpc_executor.py",
     "vllm/v1/executor/ray_executor.py",
     "vllm/entrypoints/llm.py",
     "tests/utils.py",

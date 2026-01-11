@@ -7,6 +7,7 @@ from concurrent.futures import Future
 from functools import cached_property
 from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -60,9 +61,14 @@ class Executor(ABC):
 
             executor_class = RayDistributedExecutor
         elif distributed_executor_backend == "mp":
-            from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+            if envs.VLLM_USE_MP_RPC_WORKERS:
+                from vllm.v1.executor.multiproc_rpc_executor import MultiprocRPCExecutor
 
-            executor_class = MultiprocExecutor
+                executor_class = MultiprocRPCExecutor
+            else:
+                from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+
+                executor_class = MultiprocExecutor
         elif distributed_executor_backend == "uni":
             from vllm.v1.executor.uniproc_executor import UniProcExecutor
 

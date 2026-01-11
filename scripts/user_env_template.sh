@@ -9,13 +9,16 @@ export USER_VLLM_DATA_PARALLEL_ADDRESS=172.33.0.11  # DP 0
 export USER_VLLM_DATA_PARALLEL_RPC_IP=172.33.0.10   # HEAD (API Server in headless mode)
 export USER_VLLM_DATA_PARALLEL_RPC_PORT=13345
 export USER_VLLM_PORT=14800
-# export VLLM_CPU_KVCACHE_SPACE=4
+export VLLM_CPU_KVCACHE_SPACE=4 # KV Cache Size
 
-
+export VLLM_USE_CPU_SHM_DIST=0
 export VLLM_LOOPBACK_IP=$(hostname -I | awk '{print $1}')
 # export VLLM_LOOPBACK_IP=$(ifconfig eth0 | grep "inet " | awk '{print ^C}')
 
 _VLLM_OPTIONAL_ARGS=" "
+_VLLM_OPTIONAL_ARGS+=" --max-num-seqs 16"
+# _VLLM_OPTIONAL_ARGS+=" --enforce-eager"
+
 export VLLM_OPTIONAL_ARGS=${_VLLM_OPTIONAL_ARGS}
 
 echo "VLLM_OPTIONAL_ARGS: ${VLLM_OPTIONAL_ARGS}"

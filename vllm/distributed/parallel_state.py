@@ -1201,7 +1201,10 @@ def init_distributed_environment(
             port = parallel_config.master_port
             distributed_init_method = get_distributed_init_method(ip, port)
         else:
-            ip = parallel_config.data_parallel_master_ip
+            if envs.VLLM_DP_MASTER_WORKER_IP:
+                ip = envs.VLLM_DP_MASTER_WORKER_IP
+            else:
+                ip = parallel_config.data_parallel_master_ip
             port = parallel_config.get_next_dp_init_port()
             distributed_init_method = get_distributed_init_method(ip, port)
             logger.debug(

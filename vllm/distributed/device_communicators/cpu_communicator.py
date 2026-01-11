@@ -7,6 +7,7 @@ from typing import Any
 import torch
 from torch.distributed import ProcessGroup
 
+from vllm import envs
 from vllm.distributed.utils import pickle
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
@@ -29,6 +30,7 @@ class CpuCommunicator(DeviceCommunicatorBase):
             (current_platform.get_cpu_architecture() == CpuArchEnum.X86)
             and hasattr(torch.ops._C, "init_shm_manager")
             and (unique_name.startswith("tp") or unique_name.startswith("pp"))
+            and envs.VLLM_USE_CPU_SHM_DIST
         ):
             self.dist_module = _CPUSHMDistributed(self)
 
