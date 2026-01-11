@@ -35,7 +35,8 @@ VLLM_LOGGING_LEVEL=${USER_VLLM_LOGGING_LEVEL} vllm serve ${USER_VLLM_MODEL} \
   --headless \
   --max-model-len ${USER_VLLM_MAX_MODEL_LEN} \
   --max-num-batched-tokens ${USER_VLLM_MAX_NUM_BATCHED_TOKENS} \
-  --tensor-parallel-size ${USER_VLLM_TP_SIZE} \
+  -tp=${USER_VLLM_TP_SIZE} \
+  -pp=${USER_VLLM_PP_SIZE} \
   --distributed-executor-backend mp \
   --data-parallel-size ${USER_VLLM_DATA_PARALLEL_SIZE} \
   --data-parallel-size-local 1 \

@@ -39,6 +39,9 @@ VLLM_LOGGING_LEVEL=${USER_VLLM_LOGGING_LEVEL} vllm serve ${USER_VLLM_MODEL} \
   --headless \
   --max-model-len ${USER_VLLM_MAX_MODEL_LEN} \
   --max-num-batched-tokens ${USER_VLLM_MAX_NUM_BATCHED_TOKENS} \
+  -tp=${USER_VLLM_TP_SIZE} \
+  -pp=${USER_VLLM_PP_SIZE} \
+  --distributed-executor-backend mp \
   --port ${USER_VLLM_PORT} \
   --enforce-eager \
   --data-parallel-size ${USER_VLLM_DATA_PARALLEL_SIZE} \
