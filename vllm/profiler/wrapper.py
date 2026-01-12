@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import csv
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import nullcontext
+from datetime import datetime
 from typing import Literal
 
 import torch
@@ -271,6 +273,25 @@ class TorchProfilerWrapper(WorkerProfiler):
                     sort_by="self_cpu_time_total", row_limit=50
                 )
             )
+            ts = datetime.timestamp(datetime.now())
+
+            profiler_dir = profiler_config.torch_profiler_dir
+            profiler_out_file = f"{profiler_dir}/profiler_out_{rank}_{ts}.txt"
+            sort_key = "self_cpu_time_total"
+            table = self.profiler.key_averages().table(sort_by=sort_key)
+
+            with open(profiler_out_file, "w") as f:
+                print(table, file=f)
+
+            key_averages_events = self.profiler.key_averages()
+            profiler_csv_file = f"{profiler_dir}/profiler_out_{rank}_{ts}.csv"
+            headers = list(vars(key_averages_events[0]).keys())
+
+            with open(profiler_csv_file, "w", newline="") as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(headers)
+                for event in key_averages_events:
+                    writer.writerow(vars(event).values())
 
     @override
     def _profiler_step(self) -> bool:
