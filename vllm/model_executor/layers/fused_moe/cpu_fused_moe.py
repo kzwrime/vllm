@@ -6,9 +6,15 @@ from collections.abc import Callable
 import torch
 from torch.nn import functional as F
 
+# Modular kernel interface for CPU MoE
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
 from vllm.model_executor.layers.activation import SiluAndMul, SwigluOAIAndMul
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceNoOP,
+)
 from vllm.model_executor.layers.quantization.utils.layer_utils import replace_parameter
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -396,6 +402,7 @@ def cpu_fused_moe_torch(
     global_num_experts: int = -1,
 ) -> None:
     layer = _CPU_MOE_LAYER_CACHE[layer_id]()
+    assert layer is not None
 
     # Ref code from https://github.com/sgl-project/sglang/blob/716e682721397df103f347d22da8bd46c6016dab/python/sglang/srt/layers/moe/fused_moe_native.py#L53
     len_experts = global_num_experts
@@ -411,6 +418,8 @@ def cpu_fused_moe_torch(
     outputs = []
     start_idx = 0
 
+    assert layer.activation == "silu"
+
     for i, num_tokens in enumerate(tokens_per_expert):
         end_idx = start_idx + num_tokens
         if num_tokens == 0:
@@ -418,8 +427,8 @@ def cpu_fused_moe_torch(
         tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
 
         gate_up = layer.gate_up_linear[i](tokens_for_this_expert)  # type: ignore
-        gate_up = _CPU_MOE_ACT[activation].forward_native(gate_up)
-        expert_out = layer.down_linear[i](gate_up)  # type: ignore
+        act_out = SiluAndMul.forward_native(gate_up)
+        expert_out = layer.down_linear[i](act_out)  # type: ignore
         outputs.append(expert_out)
         start_idx = end_idx
 
@@ -442,3 +451,98 @@ direct_register_custom_op(
     op_func=cpu_fused_moe_torch,
     mutates_args=["output"],
 )
+
+
+class CPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
+    """
+    CPU implementation of FusedMoEPermuteExpertsUnpermute.
+    This wraps the existing CPUFusedMOE implementation to conform
+    to the standard modular kernel interface.
+    """
+
+    def __init__(
+        self,
+        layer: torch.nn.Module,
+        quant_config: FusedMoEQuantConfig,
+    ):
+        super().__init__(quant_config)
+        self.layer = layer
+        self.cpu_fused_moe_impl = CPUFusedMOE(layer)
+
+    @property
+    def activation_formats(
+        self,
+    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
+        return (
+            mk.FusedMoEActivationFormat.Standard,
+            mk.FusedMoEActivationFormat.Standard,
+        )
+
+    def supports_chunking(self) -> bool:
+        return False
+
+    def supports_expert_map(self) -> bool:
+        return False
+
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        # CPUFusedMOE already handles weight application and reduction
+        return TopKWeightAndReduceNoOP()
+
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        # CPU implementation doesn't need intermediate workspaces
+        # It produces the final output directly
+        workspace13 = (0,)
+        workspace2 = (0,)
+        output = (M, K)
+        return (workspace13, workspace2, output)
+
+    def apply(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        apply_router_weight_on_input: bool,
+    ) -> None:
+        """
+        Execute CPU MoE computation using the existing CPUFusedMOE implementation.
+        Note: topk_weights and topk_ids should already be computed by router.
+        """
+        assert not apply_router_weight_on_input, (
+            "CPU MoE does not support apply_router_weight_on_input"
+        )
+        assert expert_map is None, "CPU MoE does not support expert_map"
+
+        # Call the appropriate forward method based on the implementation
+        # The forward_method expects:
+        # layer, input, topk_weights, topk_ids, activation, global_num_experts
+        result = self.cpu_fused_moe_impl.forward_method(
+            self.layer,
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            activation,
+            global_num_experts,
+        )
+
+        # Copy result to output tensor
+        output.copy_(result)

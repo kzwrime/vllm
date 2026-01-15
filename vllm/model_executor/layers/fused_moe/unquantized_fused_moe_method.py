@@ -39,7 +39,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.platforms.interface import CpuArchEnum
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
 if current_platform.is_cuda_alike():
@@ -217,34 +216,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         elif current_platform.is_cpu():
             from vllm.model_executor.layers.fused_moe import cpu_fused_moe
 
-            if current_platform.get_cpu_architecture() == CpuArchEnum.X86:
-                from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
-
-                dtype_w13 = layer.w13_weight.dtype
-                _, n_w13, k_w13 = layer.w13_weight.size()
-                dtype_w2 = layer.w2_weight.dtype
-                _, n_w2, k_w2 = layer.w2_weight.size()
-                if (
-                    envs.VLLM_CPU_SGL_KERNEL
-                    and check_cpu_sgl_kernel(n_w13, k_w13, dtype_w13)
-                    and check_cpu_sgl_kernel(n_w2, k_w2, dtype_w2)
-                ):
-                    packed_w13_weight = torch.ops._C.convert_weight_packed(
-                        layer.w13_weight
-                    )
-                    assert packed_w13_weight.size() == layer.w13_weight.size()
-                    layer.w13_weight.copy_(packed_w13_weight)
-                    del packed_w13_weight
-                    packed_w2_weight = torch.ops._C.convert_weight_packed(
-                        layer.w2_weight
-                    )
-                    assert packed_w2_weight.size() == layer.w2_weight.size()
-                    layer.w2_weight.copy_(packed_w2_weight)
-                    layer.cpu_fused_moe = cpu_fused_moe.SGLFusedMOE(layer)
-                else:
-                    layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
-            else:
-                layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
+            # Use standard modular kernel interface for CPU
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+            self.use_inplace = False
+            self.kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                cpu_fused_moe.CPUExperts(layer, self.moe_quant_config),
+                shared_experts=None,
+            )
         elif current_platform.is_cuda_alike():
             self.moe_quant_config = self.get_fused_moe_quant_config(layer)
             if self.rocm_aiter_moe_enabled:
@@ -351,24 +330,25 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         ):
             raise NotImplementedError("Expert load balancing is not supported for CPU.")
 
-        return layer.cpu_fused_moe(
-            layer,
-            x,
-            layer.use_grouped_topk,
-            layer.top_k,
-            router_logits,
-            layer.renormalize,
-            layer.topk_group,
-            layer.num_expert_group,
-            layer.global_num_experts,
-            layer.expert_map,
-            layer.custom_routing_function,
-            layer.scoring_func,
-            layer.routed_scaling_factor,
-            layer.e_score_correction_bias,
-            layer.apply_router_weight_on_input,
-            layer.activation,
+        topk_weights, topk_ids = router.select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
         )
+
+        result = self.kernel(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            inplace=False,
+            activation=layer.activation,
+            apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            global_num_experts=layer.global_num_experts,
+            expert_map=layer.expert_map,
+        )
+
+        return result
 
     def forward_xpu(
         self,
