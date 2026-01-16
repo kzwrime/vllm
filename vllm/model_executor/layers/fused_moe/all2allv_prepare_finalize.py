@@ -82,8 +82,8 @@ class All2AllSinglePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # These are set during prepare_async and used during finalize_async
         self._send_split_sizes: list[int] | None = None
         self._recv_split_sizes: list[int] | None = None
-        self._original_indices: torch.Tensor | None = (
-            None  # Maps scattered tokens back to original positions
+        self._send_original_indices: torch.Tensor | None = (
+            None  # Original indices of tokens we sent to other ranks
         )
 
     @property
@@ -201,9 +201,6 @@ class All2AllSinglePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         Returns a callable that when invoked completes the dispatch operation.
         """
 
-        import traceback
-
-        traceback.print_stack()
         logger.info(f"[PREPARE][rank{self.ep_rank}] a1.shape = {a1.shape}, topk_ids.shape = {topk_ids.shape}")
 
         num_tokens = a1.size(0)
@@ -354,8 +351,7 @@ class All2AllSinglePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             f"[PREPARE][rank{self.ep_rank}] After all_to_all_single: "
             f"recv_buffer.shape={recv_buffer.shape}, "
             f"recv_topk_ids.shape={recv_topk_ids.shape}, "
-            f"recv_topk_weights.shape={recv_topk_weights.shape}, "
-            f"recv_original_indices.shape={recv_original_indices.shape if 'recv_original_indices' in locals() else 'not_created'}"
+            f"recv_topk_weights.shape={recv_topk_weights.shape}"
         )
         if recv_buffer.shape[0] == recv_topk_ids.shape[0] == recv_topk_weights.shape[0]:
             logger.info(f"[PREPARE][rank{self.ep_rank}] ✓ Metadata shapes match recv_buffer")
@@ -366,18 +362,12 @@ class All2AllSinglePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 f"weights={recv_topk_weights.shape[0]}"
             )
 
-        # Exchange original token indices for finalize phase
-        recv_original_indices = torch.empty(total_recv, device=device, dtype=torch.long)
-        dist.all_to_all_single(
-            recv_original_indices,
-            send_indices_tensor,
-            output_split_sizes=recv_split_sizes.tolist(),
-            input_split_sizes=send_split_sizes,
-            group=self.ep_group,
+        # Store the original indices of tokens we SENT (not received!)
+        # This will be sent to other ranks in finalize phase
+        self._send_original_indices = send_indices_tensor.clone()
+        logger.info(
+            f"[PREPARE][rank{self.ep_rank}] Stored send_original_indices.shape={self._send_original_indices.shape}"
         )
-
-        # Store original indices for finalize phase
-        self._original_indices = recv_original_indices
 
         # Count tokens per local expert (using received topk_ids)
         expert_num_tokens = count_expert_num_tokens(
@@ -559,7 +549,6 @@ class All2AllSinglePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         )
         logger.info(
             f"[FINALIZE][rank{self.ep_rank}] "
-            f"self._original_indices.shape={self._original_indices.shape}, "
             f"fused_expert_output.shape={fused_expert_output.shape}, "
             f"num_scattered_tokens={num_scattered_tokens}"
         )
@@ -579,7 +568,7 @@ class All2AllSinglePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         logger.info(
             f"[FINALIZE][rank{self.ep_rank}] Before all_to_all_single: "
             f"total_recv_tokens={total_recv_tokens}, "
-            f"self._original_indices.shape={self._original_indices.shape}"
+            f"self._send_original_indices.shape={self._send_original_indices.shape}"
         )
 
         # Perform reverse all_to_all_single
@@ -591,36 +580,47 @@ class All2AllSinglePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             group=self.ep_group,
         )
 
-        # The recv_buffer now contains the results in the original scattered order
-        # We need to accumulate them to get the final output
-        # Since each token may have been routed to multiple experts (topk > 1),
-        # we need to sum the contributions at the original token positions
+        # Receive original indices along with results
+        # These tell us which original position each received result corresponds to
+        # recv_original_indices = torch.empty(
+        #     total_recv_tokens, device=device, dtype=torch.long
+        # )
+        # dist.all_to_all_single(
+        #     recv_original_indices,
+        #     self._send_original_indices,
+        #     output_split_sizes=finalize_recv_sizes,
+        #     input_split_sizes=finalize_send_sizes,
+        #     group=self.ep_group,
+        # )
 
-        # Use the original indices from prepare phase to scatter results back
-        assert self._original_indices is not None, (
-            "original_indices not set - was prepare called?"
-        )
+        # logger.info(
+        #     f"[FINALIZE][rank{self.ep_rank}] Received original_indices: "
+        #     f"recv_original_indices.shape={recv_original_indices.shape}, "
+        #     f"recv_buffer.shape={recv_buffer.shape}"
+        # )
 
-        # self._original_indices maps each received result back to its original token
+        # The recv_buffer now contains the results in the order they were originally sent
+        # Use recv_original_indices to scatter results back to original positions
+
         output.zero_()
         if recv_buffer.numel() > 0 and total_recv_tokens > 0:
             # Scatter add: accumulate results at original token positions
             logger.info(
                 f"[FINALIZE][rank{self.ep_rank}] Starting scatter add loop: "
                 f"total_recv_tokens={total_recv_tokens}, "
-                f"self._original_indices.shape={self._original_indices.shape}, "
+                f"_send_original_indices.shape={self._send_original_indices.shape}, "
                 f"num_output_tokens={num_output_tokens}"
             )
             for i in range(total_recv_tokens):
-                if i >= self._original_indices.shape[0]:
+                if i >= self._send_original_indices.shape[0]:
                     logger.error(
                         f"[FINALIZE][rank{self.ep_rank}] ERROR: i={i} >= "
-                        f"self._original_indices.shape[0]={self._original_indices.shape[0]}"
+                        f"self._send_original_indices.shape[0]={self._send_original_indices.shape[0]}"
                     )
                     raise IndexError(
-                        f"index {i} is out of bounds for dimension 0 with size {self._original_indices.shape[0]}"
+                        f"index {i} is out of bounds for dimension 0 with size {self._send_original_indices.shape[0]}"
                     )
-                original_idx = self._original_indices[i].item()
+                original_idx = self._send_original_indices[i].item()
                 if 0 <= original_idx < num_output_tokens:
                     output[original_idx].add_(recv_buffer[i])
 
