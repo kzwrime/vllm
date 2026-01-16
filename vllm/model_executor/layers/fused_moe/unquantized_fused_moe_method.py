@@ -16,6 +16,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     biased_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.cpu_fused_moe import (
+    CPUExperts,
+)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
 )
@@ -46,7 +49,6 @@ if current_platform.is_cuda_alike():
     from .fused_moe import TritonExperts
 else:
     TritonExperts = None  # type: ignore
-
 
 logger = init_logger(__name__)
 
@@ -126,6 +128,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 quant_config=self.moe_quant_config,
             )
         else:
+            if current_platform.is_cpu():
+                logger.debug("CPUExperts %s", self.moe)
+                return CPUExperts(layer, self.moe_quant_config)
             logger.debug("TritonExperts %s", self.moe)
             return TritonExperts(self.moe_quant_config)
 
@@ -214,14 +219,11 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 experts_start_id=ep_rank_start,
             )
         elif current_platform.is_cpu():
-            from vllm.model_executor.layers.fused_moe import cpu_fused_moe
-
             # Use standard modular kernel interface for CPU
             self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-            self.use_inplace = False
             self.kernel = mk.FusedMoEModularKernel(
                 MoEPrepareAndFinalizeNoEP(),
-                cpu_fused_moe.CPUExperts(layer, self.moe_quant_config),
+                CPUExperts(layer, self.moe_quant_config),
                 shared_experts=None,
             )
         elif current_platform.is_cuda_alike():
