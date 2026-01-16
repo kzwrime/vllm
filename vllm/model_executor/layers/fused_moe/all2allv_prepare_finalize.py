@@ -204,7 +204,7 @@ class All2AllSinglePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         import traceback
 
         traceback.print_stack()
-        logger.info(f"a1.shape = {a1.shape}, topk_ids.shape = {topk_ids.shape}")
+        logger.info(f"[PREPARE][rank{self.ep_rank}] a1.shape = {a1.shape}, topk_ids.shape = {topk_ids.shape}")
 
         num_tokens = a1.size(0)
         hidden_dim = a1.size(1)
@@ -244,7 +244,7 @@ class All2AllSinglePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             rank_assignments[rank].append((token_idx, k, expert_id))
 
         rank_assignments_sum = [len(x) for x in rank_assignments]
-        logger.info(f"rank_assignments_sum = {rank_assignments_sum}")
+        logger.info(f"[PREPARE][rank{self.ep_rank}] rank_assignments_sum = {rank_assignments_sum}")
 
         # Build send buffer: concatenate tokens for each rank in order
         send_indices = []
@@ -275,12 +275,20 @@ class All2AllSinglePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             group=self.ep_group,
         )
 
-        # Store split sizes for finalize phase (reverse operation will use swapped sizes)
+        # Store split sizes for finalize phase
+        # (reverse operation will use swapped sizes)
         self._send_split_sizes = send_split_sizes
         self._recv_split_sizes = recv_split_sizes.tolist()
 
         # Total tokens to receive
         total_recv = recv_split_sizes.sum().item()
+
+        logger.info(
+            f"[PREPARE][rank{self.ep_rank}] "
+            f"send_split_sizes={send_split_sizes}, "
+            f"recv_split_sizes={recv_split_sizes.tolist()}, "
+            f"total_send={sum(send_split_sizes)}, total_recv={total_recv}"
+        )
 
         # Allocate receive buffer
         recv_buffer = torch.empty(
@@ -341,6 +349,23 @@ class All2AllSinglePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             group=self.ep_group,
         )
 
+        # Validate that metadata aligns with recv_buffer
+        logger.info(
+            f"[PREPARE][rank{self.ep_rank}] After all_to_all_single: "
+            f"recv_buffer.shape={recv_buffer.shape}, "
+            f"recv_topk_ids.shape={recv_topk_ids.shape}, "
+            f"recv_topk_weights.shape={recv_topk_weights.shape}, "
+            f"recv_original_indices.shape={recv_original_indices.shape if 'recv_original_indices' in locals() else 'not_created'}"
+        )
+        if recv_buffer.shape[0] == recv_topk_ids.shape[0] == recv_topk_weights.shape[0]:
+            logger.info(f"[PREPARE][rank{self.ep_rank}] ✓ Metadata shapes match recv_buffer")
+        else:
+            logger.error(
+                f"[PREPARE][rank{self.ep_rank}] ✗ Shape mismatch! "
+                f"buffer={recv_buffer.shape[0]}, ids={recv_topk_ids.shape[0]}, "
+                f"weights={recv_topk_weights.shape[0]}"
+            )
+
         # Exchange original token indices for finalize phase
         recv_original_indices = torch.empty(total_recv, device=device, dtype=torch.long)
         dist.all_to_all_single(
@@ -391,7 +416,8 @@ class All2AllSinglePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             )
 
         def _receiver() -> mk.PrepareResultType:
-            # Return topk_ids and topk_weights with shape (num_tokens, 1) to satisfy dim == 2 assertion
+            # Return topk_ids and topk_weights with shape (num_tokens, 1) 
+            # to satisfy dim == 2 assertion
             return (
                 recv_buffer,
                 recv_scale,
@@ -461,6 +487,14 @@ class All2AllSinglePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         device = output.device
         dtype = output.dtype
 
+        logger.info(
+            f"[FINALIZE][rank{self.ep_rank}] Input shapes: "
+            f"fused_expert_output.shape={fused_expert_output.shape}, "
+            f"topk_ids.shape={topk_ids.shape}, "
+            f"topk_weights.shape={topk_weights.shape}, "
+            f"num_scattered_tokens={num_scattered_tokens}"
+        )
+
         # Get the original output size (number of original tokens)
         num_output_tokens = output.size(0)
 
@@ -468,9 +502,23 @@ class All2AllSinglePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
             weight_and_reduce_impl = TopKWeightAndReduceContiguous()
 
+        # Validate shape consistency
+        if fused_expert_output.shape[0] != num_scattered_tokens:
+            logger.error(
+                f"[FINALIZE][rank{self.ep_rank}] Shape mismatch detected! "
+                f"fused_expert_output.shape[0]={fused_expert_output.shape[0]} != "
+                f"num_scattered_tokens={num_scattered_tokens} "
+                f"(from topk_ids.shape[0]={topk_ids.shape[0]})"
+            )
+            logger.error(
+                f"[FINALIZE][rank{self.ep_rank}] This indicates a bug in the data flow between "
+                f"prepare and fused_experts!"
+            )
+
         if fused_expert_output.numel() > 0:
             # Apply weights and reduce
-            # Note: topk_weights here are the flattened ones matching the scattered tokens
+            # Note: topk_weights here are the flattened ones 
+            # matching the scattered tokens
             fused_expert_output = weight_and_reduce_impl.apply(
                 output=None,
                 fused_expert_output=fused_expert_output,
@@ -503,6 +551,19 @@ class All2AllSinglePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             self._send_split_sizes
         )  # Tokens we sent in prepare, now receive back
 
+        logger.info(
+            f"[FINALIZE][rank{self.ep_rank}] "
+            f"finalize_send_sizes={finalize_send_sizes}, "
+            f"finalize_recv_sizes={finalize_recv_sizes}, "
+            f"sum(send)={sum(finalize_send_sizes)}, sum(recv)={sum(finalize_recv_sizes)}"
+        )
+        logger.info(
+            f"[FINALIZE][rank{self.ep_rank}] "
+            f"self._original_indices.shape={self._original_indices.shape}, "
+            f"fused_expert_output.shape={fused_expert_output.shape}, "
+            f"num_scattered_tokens={num_scattered_tokens}"
+        )
+
         # Prepare send buffer
         if fused_expert_output.numel() > 0:
             send_buffer = fused_expert_output.view(num_scattered_tokens, hidden_dim)
@@ -513,6 +574,12 @@ class All2AllSinglePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         total_recv_tokens = sum(finalize_recv_sizes)
         recv_buffer = torch.empty(
             (total_recv_tokens, hidden_dim), device=device, dtype=dtype
+        )
+
+        logger.info(
+            f"[FINALIZE][rank{self.ep_rank}] Before all_to_all_single: "
+            f"total_recv_tokens={total_recv_tokens}, "
+            f"self._original_indices.shape={self._original_indices.shape}"
         )
 
         # Perform reverse all_to_all_single
@@ -534,11 +601,25 @@ class All2AllSinglePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             "original_indices not set - was prepare called?"
         )
 
+        # self._original_indices maps each received result back to its original token
         output.zero_()
         if recv_buffer.numel() > 0 and total_recv_tokens > 0:
             # Scatter add: accumulate results at original token positions
-            # self._original_indices maps each received result back to its original token
+            logger.info(
+                f"[FINALIZE][rank{self.ep_rank}] Starting scatter add loop: "
+                f"total_recv_tokens={total_recv_tokens}, "
+                f"self._original_indices.shape={self._original_indices.shape}, "
+                f"num_output_tokens={num_output_tokens}"
+            )
             for i in range(total_recv_tokens):
+                if i >= self._original_indices.shape[0]:
+                    logger.error(
+                        f"[FINALIZE][rank{self.ep_rank}] ERROR: i={i} >= "
+                        f"self._original_indices.shape[0]={self._original_indices.shape[0]}"
+                    )
+                    raise IndexError(
+                        f"index {i} is out of bounds for dimension 0 with size {self._original_indices.shape[0]}"
+                    )
                 original_idx = self._original_indices[i].item()
                 if 0 <= original_idx < num_output_tokens:
                     output[original_idx].add_(recv_buffer[i])
