@@ -260,12 +260,14 @@ class CPUFusedMOE:
             topk_ids,
             activation,
             global_num_experts,
+            expert_map,
         )
 
     def check_grouped_gemm(
         self,
         layer: torch.nn.Module,
     ) -> tuple[bool, str]:
+        return False, "none"  # TODO Only cpu_fused_moe_torch support expert_map
         if not hasattr(torch.ops._C, "prepack_moe_weight"):
             return False, "none"
 
@@ -354,6 +356,7 @@ class CPUFusedMOE:
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int = -1,
+        expert_map: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output = cpu_fused_moe(
             input,
@@ -376,6 +379,7 @@ class CPUFusedMOE:
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int = -1,
+        expert_map: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output = torch.empty_like(input)
         layer_id = id(layer)
@@ -387,6 +391,7 @@ class CPUFusedMOE:
             topk_ids,
             activation,
             global_num_experts,
+            expert_map,
         )
 
         return output
@@ -400,12 +405,17 @@ def cpu_fused_moe_torch(
     topk_ids: torch.Tensor,
     activation: str,
     global_num_experts: int = -1,
+    expert_map: torch.Tensor | None = None,
 ) -> None:
     layer = _CPU_MOE_LAYER_CACHE[layer_id]()
     assert layer is not None
 
     # Ref code from https://github.com/sgl-project/sglang/blob/716e682721397df103f347d22da8bd46c6016dab/python/sglang/srt/layers/moe/fused_moe_native.py#L53
     len_experts = global_num_experts
+
+    if expert_map is not None:
+        num_local_experts = (expert_map != -1).sum()
+        assert num_local_experts == layer.w13_weight.shape[0]
 
     cnts = topk_ids.new_zeros((topk_ids.shape[0], len_experts))
     cnts.scatter_(1, topk_ids.to(torch.int64), 1)
@@ -426,9 +436,17 @@ def cpu_fused_moe_torch(
             continue
         tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
 
-        gate_up = layer.gate_up_linear[i](tokens_for_this_expert)  # type: ignore
-        act_out = SiluAndMul.forward_native(gate_up)
-        expert_out = layer.down_linear[i](act_out)  # type: ignore
+        lid = i  # local index
+        if expert_map is not None:
+            lid = expert_map[i]
+
+        if lid == -1:
+            expert_out = torch.zeros_like(tokens_for_this_expert)
+        else:
+            gate_up = layer.gate_up_linear[lid](tokens_for_this_expert)  # type: ignore
+            act_out = SiluAndMul.forward_native(gate_up)
+            expert_out = layer.down_linear[lid](act_out)  # type: ignore
+
         outputs.append(expert_out)
         start_idx = end_idx
 
@@ -482,7 +500,7 @@ class CPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return False
 
     def supports_expert_map(self) -> bool:
-        return False
+        return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # CPUFusedMOE already handles weight application and reduction
@@ -530,7 +548,6 @@ class CPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
         assert not apply_router_weight_on_input, (
             "CPU MoE does not support apply_router_weight_on_input"
         )
-        assert expert_map is None, "CPU MoE does not support expert_map"
 
         # Call the appropriate forward method based on the implementation
         # The forward_method expects:
@@ -542,6 +559,7 @@ class CPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
             topk_ids,
             activation,
             global_num_experts,
+            expert_map,
         )
 
         # Copy result to output tensor
