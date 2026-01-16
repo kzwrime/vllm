@@ -31,6 +31,10 @@ if current_platform.is_cuda_alike():
             DeepEPLLPrepareAndFinalize,
         )
 
+from .all2allv_prepare_finalize import (
+    create_all2all_single_prepare_finalize,
+)
+
 
 def maybe_roundup_layer_hidden_size(
     hidden_size: int,
@@ -168,6 +172,23 @@ def maybe_make_prepare_finalize(
             global_to_physical=global_to_physical,
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,
+        )
+    elif moe.use_all2allv_kernels:
+        # Use torch.distributed.all_to_all_single backend
+        _ep_group = get_ep_group()
+        assert _ep_group is not None
+        ep_group = (
+            _ep_group.device_communicator.device_group
+            if _ep_group.device_communicator.device_group is not None
+            else _ep_group.device_communicator.cpu_group
+        )
+        num_dispatchers = all2all_manager.world_size
+
+        prepare_finalize = create_all2all_single_prepare_finalize(
+            ep_group=ep_group,
+            num_local_experts=moe.num_local_experts,
+            num_dispatchers=num_dispatchers,
+            rank_expert_offset=all2all_manager.rank * moe.num_local_experts,
         )
 
     return prepare_finalize
