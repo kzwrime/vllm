@@ -603,6 +603,8 @@ _BAR_FORMAT = "{desc}: {percentage:3.0f}% Completed | {n_fmt}/{total_fmt} [{elap
 
 
 def enable_tqdm(use_tqdm_on_load: bool):
+    if envs.VLLM_DISABLE_TQDM_AND_MONITOR:
+        return False
     return use_tqdm_on_load and (
         not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
     )

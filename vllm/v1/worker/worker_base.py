@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, TypeVar
 import torch
 import torch.nn as nn
 
+from vllm import envs
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -30,6 +31,13 @@ else:
 logger = init_logger(__name__)
 
 _R = TypeVar("_R")
+
+if envs.VLLM_DISABLE_TQDM_AND_MONITOR:
+    import tqdm
+
+    # Set 0 to disable tqdm monitor thread
+    tqdm.tqdm.monitor_interval = 0
+    tqdm.tqdm.disable = True
 
 
 class WorkerBase:
