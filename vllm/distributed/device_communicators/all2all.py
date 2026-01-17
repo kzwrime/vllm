@@ -507,3 +507,36 @@ class FlashInferAllToAllManager(All2AllManagerBase):
                 self.prepare_workspace_tensor = None
                 self.mapping = None
                 self.initialized = False
+
+
+class All2AllSingleManager(All2AllManagerBase):
+    """
+    All2All communication based on torch.distributed.all_to_all_single.
+
+    This manager uses the standard PyTorch all_to_all_single collective
+    for expert parallel token dispatching and combining.
+    """
+
+    def __init__(self, cpu_group):
+        super().__init__(cpu_group)
+        logger.debug(
+            "Initialize for All2AllSingle rank=%d, world size=%d",
+            self.rank,
+            self.world_size,
+        )
+        self.handle_cache = Cache()
+
+    def get_handle(self, kwargs):
+        """
+        Return the process group for all_to_all_single operations.
+        The handle is simply the dp_group (or ep_group) that will be used
+        for communication.
+        """
+        # For all_to_all_single, we use the dp_group for communication
+        # The handle can be the group itself or a simple wrapper
+        return self.dp_group
+
+    def destroy(self):
+        """Clean up resources."""
+        with self.handle_cache._lock:
+            self.handle_cache._cache.clear()
