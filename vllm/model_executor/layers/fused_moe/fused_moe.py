@@ -1325,9 +1325,42 @@ def vllm_topk_softmax(
     return topk_weights, topk_indices
 
 
+def cpu_topk_softmax(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    CPU implementation of topk_softmax.
+    Reference: vllm/model_executor/layers/fused_moe/cpu_fused_moe.py select_experts
+    """
+    # Get topk values and indices directly from gating_output (logits)
+    topk = topk_indices.shape[1]
+    topk_logit_vals, topk_idx = torch.topk(
+        gating_output.float(), k=topk, dim=-1, sorted=False
+    )
+
+    # Normalize if needed
+    if renormalize:
+        topk_vals = torch.softmax(topk_logit_vals, dim=-1)
+    else:
+        logZ = torch.logsumexp(gating_output, dim=-1, keepdim=True)
+        topk_vals = (topk_logit_vals - logZ).exp()
+
+    # Copy results to output tensors
+    topk_weights.copy_(topk_vals.to(torch.float32))
+    topk_indices.copy_(topk_idx.to(torch.int32))
+
+    return topk_weights, topk_indices
+
+
 def dispatch_topk_func(
     use_rocm_aiter: bool = False,
 ) -> Callable[..., tuple[torch.Tensor, ...]]:
+    if current_platform.is_cpu():
+        return cpu_topk_softmax
     if use_rocm_aiter:
         return rocm_aiter_ops.topk_softmax
     return vllm_topk_softmax
