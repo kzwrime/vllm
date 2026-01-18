@@ -38,7 +38,11 @@ class CpuCommunicator(DeviceCommunicatorBase):
             self.dist_module = _CPUSHMDistributed(self)
 
         if self.use_all2all:
-            if self.all2all_backend != "naive":  # type: ignore[has-type]
+            if self.all2all_backend == "all_to_all_single":  # type: ignore[has-type]
+                from .all2all import All2allvSingleAll2AllManager
+
+                self.all2all_manager = All2allvSingleAll2AllManager(self.cpu_group)
+            elif self.all2all_backend != "naive":  # type: ignore[has-type]
                 logger.warning(
                     "`%s` all2all manager is not supported on CPU. "
                     "Falling back to `naive` all2all manager for CPU.",

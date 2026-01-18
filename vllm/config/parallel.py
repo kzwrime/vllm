@@ -43,6 +43,7 @@ All2AllBackend = Literal[
     "deepep_low_latency",
     "allgather_reducescatter",
     "flashinfer_all2allv",
+    "all_to_all_single",
 ]
 
 

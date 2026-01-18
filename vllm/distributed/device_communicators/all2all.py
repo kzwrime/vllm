@@ -167,6 +167,92 @@ class AgRsAll2AllManager(All2AllManagerBase):
         pass
 
 
+class All2allvSingleAll2AllManager(All2AllManagerBase):
+    """
+    An implementation of all2all communication based on
+    all_to_all_single (dispatch) and reduce-scatter (combine).
+    """
+
+    def __init__(self, cpu_group):
+        super().__init__(cpu_group)
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Gather hidden_states and router_logits from all dp ranks.
+        """
+        dp_metadata = get_forward_context().dp_metadata
+        assert dp_metadata is not None
+        sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
+        assert sizes is not None
+        dist_group = get_ep_group() if is_sequence_parallel else get_dp_group()
+        assert sizes[dist_group.rank_in_group] == hidden_states.shape[0]
+
+        assert hidden_states.dim() == 2
+        output_hidden_states = torch.empty(
+            (sum(sizes), hidden_states.shape[1]),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        assert router_logits.dim() == 2
+        output_router_logits = torch.empty(
+            (sum(sizes), router_logits.shape[1]),
+            dtype=router_logits.dtype,
+            device=router_logits.device,
+        )
+        input_split_sizes = [
+            sizes[dist_group.rank_in_group] for _ in range(dist_group.world_size)
+        ]
+        dist.all_to_all_single(
+            output_hidden_states,
+            hidden_states.repeat(dist_group.world_size, 1),  # TODO use expand
+            output_split_sizes=sizes,
+            input_split_sizes=input_split_sizes,
+        )
+        dist.all_to_all_single(
+            output_router_logits,
+            router_logits.repeat(dist_group.world_size, 1),  # TODO use expand
+            output_split_sizes=sizes,
+            input_split_sizes=input_split_sizes,
+        )
+        return output_hidden_states, output_router_logits
+
+    def combine(
+        self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
+    ) -> torch.Tensor:
+        dp_metadata = get_forward_context().dp_metadata
+        assert dp_metadata is not None
+        sizes = dp_metadata.get_chunk_sizes_across_dp_rank()
+        assert sizes is not None
+
+        dist_group = get_ep_group() if is_sequence_parallel else get_dp_group()
+        recv_hidden_states = dist_group.all_reduce(hidden_states)
+
+        size_sum = 0
+        offsets = [0 for i in range(dist_group.world_size)]
+        for i in range(len(sizes)):
+            size_sum += sizes[i]
+            offsets[i] = size_sum
+
+        start = (
+            0
+            if dist_group.rank_in_group == 0
+            else int(offsets[dist_group.rank_in_group - 1])
+        )
+        end = int(offsets[dist_group.rank_in_group])
+        hidden_states = recv_hidden_states[start:end]
+
+        return hidden_states
+
+    def destroy(self):
+        pass
+
+
 class PPLXAll2AllManager(All2AllManagerBase):
     """
     All2All communication based on PPLX kernels.
