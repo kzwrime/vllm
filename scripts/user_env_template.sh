@@ -24,7 +24,7 @@ export VLLM_LOOPBACK_IP=$(hostname -I | awk '{print $1}')
 export VLLM_USE_XCPU_LINEAR=0
 
 export VLLM_CPU_USE_MPI=0
-
+export TORCHINDUCTOR_CPP_WRAPPER=1
 export VLLM_DISABLE_TQDM_AND_MONITOR=1
 
 _VLLM_OPTIONAL_ARGS=" "
