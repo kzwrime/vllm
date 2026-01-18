@@ -202,7 +202,8 @@ class CpuPlatform(Platform):
         if (
             parallel_config.world_size > 1
             and parallel_config.distributed_executor_backend is not None
-            and parallel_config.distributed_executor_backend != "mp"
+            and parallel_config.distributed_executor_backend
+            not in ["mp", "external_launcher"]
         ):
             logger.warning(
                 (
