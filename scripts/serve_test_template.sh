@@ -25,3 +25,18 @@ curl http://localhost:${USER_VLLM_PORT}/v1/completions \
 "max_tokens": 16,
 "temperature": 0.1
 }'
+
+# curl http://localhost:${USER_VLLM_PORT}/v1/chat/completions \
+#   -H "Content-Type: application/json" \
+#   -H "Authorization: Bearer empty" \
+#   -d '{
+#     "model": "'"${USER_VLLM_MODEL}"'",
+#     "messages": [
+#       {"role": "system", "content": "You are a helpful assistant."},
+#       {"role": "user", "content": "欧盟有多少个国家，详细展开论述欧盟现状"}
+#     ],
+#     "max_tokens": 50,
+#     "temperature": 0.5
+#   }'
+
+# Set `"max_tokens": 200,` if possible
