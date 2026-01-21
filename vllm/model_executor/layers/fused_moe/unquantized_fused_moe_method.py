@@ -242,9 +242,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     layer.w2_weight.copy_(packed_w2_weight)
                     layer.cpu_fused_moe = cpu_fused_moe.SGLFusedMOE(layer)
                 else:
-                    layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
+                    layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(
+                        layer, self.moe.moe_parallel_config.ep_size
+                    )
             else:
-                layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
+                layer.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(
+                    layer, self.moe.moe_parallel_config.ep_size
+                )
         elif current_platform.is_cuda_alike():
             self.moe_quant_config = self.get_fused_moe_quant_config(layer)
             if self.rocm_aiter_moe_enabled:

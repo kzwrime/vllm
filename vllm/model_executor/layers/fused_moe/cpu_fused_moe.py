@@ -201,10 +201,10 @@ class SGLFusedMOE:
 
 
 class CPUFusedMOE:
-    def __init__(self, layer: torch.nn.Module) -> None:
+    def __init__(self, layer: torch.nn.Module, ep_size: int = 1) -> None:
         use_grouped_gemm, isa = self.check_grouped_gemm(layer)
         self.isa = isa
-        if use_grouped_gemm:
+        if use_grouped_gemm and ep_size == 1:
             self.forward_method = self.forward_grouped_gemm
             self.init_moe_grouped_gemm(layer=layer)
         else:
@@ -254,6 +254,7 @@ class CPUFusedMOE:
             topk_ids,
             activation,
             global_num_experts,
+            expert_map,
         )
 
     def check_grouped_gemm(
@@ -348,6 +349,7 @@ class CPUFusedMOE:
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int = -1,
+        expert_map: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output = cpu_fused_moe(
             input,
@@ -370,6 +372,7 @@ class CPUFusedMOE:
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int = -1,
+        expert_map: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output = torch.empty_like(input)
         layer_id = id(layer)
@@ -381,6 +384,7 @@ class CPUFusedMOE:
             topk_ids,
             activation,
             global_num_experts,
+            expert_map,
         )
 
         return output
@@ -394,11 +398,17 @@ def cpu_fused_moe_torch(
     topk_ids: torch.Tensor,
     activation: str,
     global_num_experts: int = -1,
+    expert_map: torch.Tensor | None = None,
 ) -> None:
     layer = _CPU_MOE_LAYER_CACHE[layer_id]()
+    assert layer is not None
 
     # Ref code from https://github.com/sgl-project/sglang/blob/716e682721397df103f347d22da8bd46c6016dab/python/sglang/srt/layers/moe/fused_moe_native.py#L53
     len_experts = global_num_experts
+
+    if expert_map is not None:
+        num_local_experts = (expert_map != -1).sum()
+        assert num_local_experts == layer.w13_weight.shape[0]
 
     cnts = topk_ids.new_zeros((topk_ids.shape[0], len_experts))
     cnts.scatter_(1, topk_ids.to(torch.int64), 1)
@@ -417,9 +427,19 @@ def cpu_fused_moe_torch(
             continue
         tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
 
-        gate_up = layer.gate_up_linear[i](tokens_for_this_expert)  # type: ignore
-        gate_up = _CPU_MOE_ACT[activation].forward_native(gate_up)
-        expert_out = layer.down_linear[i](gate_up)  # type: ignore
+        lid = i  # local index
+        if expert_map is not None:
+            lid = expert_map[i]
+
+        if lid == -1:
+            expert_out = torch.zeros_like(tokens_for_this_expert)
+        else:
+            gate_up = layer.gate_up_linear[lid](tokens_for_this_expert)  # type: ignore
+            if layer.activation == "silu":
+                act_out = SiluAndMul.forward_native(gate_up)
+            else:
+                act_out = _CPU_MOE_ACT[activation].forward_native(gate_up)
+            expert_out = layer.down_linear[lid](act_out)  # type: ignore
         outputs.append(expert_out)
         start_idx = end_idx
 
