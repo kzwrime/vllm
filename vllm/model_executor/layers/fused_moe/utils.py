@@ -22,6 +22,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import flashinfer_fp4_quantize
 from vllm.utils.math_utils import cdiv
@@ -60,6 +61,45 @@ def _count_expert_num_tokens(
         tl.store(expert_num_tokens_ptr + curr_expert, tl.sum(acc))
 
 
+def count_expert_num_tokens_torch_naive(
+    topk_ids: torch.Tensor, num_local_experts: int, expert_map: torch.Tensor | None
+) -> torch.Tensor:
+    """
+    Naive PyTorch implementation of count_expert_num_tokens.
+    Counts the number of tokens assigned to each expert.
+
+    Parameters:
+    - topk_ids (torch.Tensor): Tensor mapping each token to its
+    list of experts.
+    - num_local_experts (int): Number of experts in this rank.
+    - expert_map (Optional[torch.Tensor]):  A tensor mapping expert indices
+    from the global expert space to the local expert space of the expert
+    parallel shard.
+
+    Returns:
+    A tensor of size num_local_experts, where tensor[i] holds the number
+    of tokens assigned to the ith expert.
+    """
+    expert_num_tokens = torch.zeros(
+        (num_local_experts), device=topk_ids.device, dtype=torch.int32
+    )
+
+    # Flatten topk_ids to process all entries
+    flat_topk_ids = topk_ids.flatten()
+
+    # Apply expert_map if provided
+    if expert_map is not None:
+        # Map global expert IDs to local expert IDs
+        # expert_map contains -1 for invalid mappings
+        flat_topk_ids = expert_map[flat_topk_ids]
+
+    # Count tokens for each expert (only valid expert IDs >= 0)
+    for i in range(num_local_experts):
+        expert_num_tokens[i] = (flat_topk_ids == i).sum()
+
+    return expert_num_tokens
+
+
 def count_expert_num_tokens(
     topk_ids: torch.Tensor, num_local_experts: int, expert_map: torch.Tensor | None
 ) -> torch.Tensor:
@@ -79,6 +119,13 @@ def count_expert_num_tokens(
     of tokens assigned to the ith expert.
     """
     assert topk_ids.dtype.is_signed, "The kernel uses -1 to represent invalid topk_ids"
+
+    # Use naive torch implementation for CPU
+    if current_platform.is_cpu():
+        return count_expert_num_tokens_torch_naive(
+            topk_ids, num_local_experts, expert_map
+        )
+
     expert_num_tokens = torch.empty(
         (num_local_experts), device=topk_ids.device, dtype=torch.int32
     )

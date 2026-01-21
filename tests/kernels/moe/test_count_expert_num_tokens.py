@@ -71,26 +71,29 @@ def do_test_compute_expert_num_tokens(
     num_experts: int,
     ep_size: int,
     topk_ids_dtype: torch.dtype,
+    device: str,
 ):
     assert num_topk <= num_experts
 
     tt = TestTensors.make(
-        num_tokens, num_topk, num_experts, topk_ids_dtype=topk_ids_dtype, device="cpu"
+        num_tokens, num_topk, num_experts, topk_ids_dtype=topk_ids_dtype, device=device
     )
 
     num_global_experts = num_experts
     assert num_global_experts % ep_size == 0
     num_local_experts = num_global_experts // ep_size
     for ep_rank in range(ep_size):
-        tt_rank = tt.with_ep_rank(ep_rank, num_global_experts, num_local_experts, "cpu")
+        tt_rank = tt.with_ep_rank(
+            ep_rank, num_global_experts, num_local_experts, device
+        )
 
         ref_expert_num_tokens = torch.zeros(
             (num_local_experts), device="cpu", dtype=torch.int32
         )
         ref_impl(tt_rank, ref_expert_num_tokens)
-        ref_expert_num_tokens = ref_expert_num_tokens.to("cuda")
+        ref_expert_num_tokens = ref_expert_num_tokens.to(device)
 
-        tt_rank.to_device("cuda")
+        tt_rank.to_device(device)
         # Test with expert_map
         triton_expert_num_tokens_w_emap = count_expert_num_tokens(
             tt_rank.topk_ids, num_local_experts, tt_rank.expert_map
@@ -115,15 +118,19 @@ def do_test_compute_expert_num_tokens(
 @pytest.mark.parametrize("num_experts", [64])
 @pytest.mark.parametrize("ep_size", [1, 2, 4])
 @pytest.mark.parametrize("topk_ids_dtype", [torch.int64])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_compute_expert_num_tokens(
     num_tokens: int,
     num_topk: int,
     num_experts: int,
     ep_size: int,
     topk_ids_dtype: torch.dtype,
+    device: str,
 ):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
     do_test_compute_expert_num_tokens(
-        num_tokens, num_topk, num_experts, ep_size, topk_ids_dtype
+        num_tokens, num_topk, num_experts, ep_size, topk_ids_dtype, device
     )
 
 
@@ -131,13 +138,17 @@ def test_compute_expert_num_tokens(
 @pytest.mark.parametrize("num_experts", [32])
 @pytest.mark.parametrize("ep_size", [2])
 @pytest.mark.parametrize("topk_ids_dtype", [torch.int64])
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_compute_expert_num_tokens_from_numel(
-    numel: int, num_experts: int, ep_size: int, topk_ids_dtype: torch.dtype
+    numel: int, num_experts: int, ep_size: int, topk_ids_dtype: torch.dtype, device: str
 ):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
     do_test_compute_expert_num_tokens(
         num_tokens=numel,
         num_topk=1,
         num_experts=num_experts,
         ep_size=ep_size,
         topk_ids_dtype=topk_ids_dtype,
+        device=device,
     )
