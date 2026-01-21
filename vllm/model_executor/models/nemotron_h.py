@@ -25,6 +25,7 @@ from itertools import islice
 import torch
 from torch import nn
 
+from vllm import envs
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -90,15 +91,17 @@ class NemotronHMLP(nn.Module):
         reduce_results: bool = True,
         is_sequence_parallel: bool = False,
         prefix: str = "",
+        disable_tp: bool = False,
     ) -> None:
         super().__init__()
 
+        disable_tp = is_sequence_parallel or disable_tp
         self.up_proj = ColumnParallelLinear(
             input_size=hidden_size,
             output_size=intermediate_size,
             bias=bias,
             quant_config=quant_config,
-            disable_tp=is_sequence_parallel,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.up_proj",
         )
         self.down_proj = RowParallelLinear(
@@ -107,7 +110,7 @@ class NemotronHMLP(nn.Module):
             bias=bias,
             quant_config=quant_config,
             reduce_results=reduce_results,
-            disable_tp=is_sequence_parallel,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.down_proj",
         )
         self.act_fn = ReLUSquaredActivation()
@@ -183,6 +186,7 @@ class NemotronHMoE(nn.Module):
                 reduce_results=False,
                 is_sequence_parallel=self.is_sequence_parallel,
                 prefix=f"{prefix}.shared_experts",
+                disable_tp=envs.VLLM_SHARED_EXPERT_DISABLE_TP,
             )
 
         self.experts = SharedFusedMoE(

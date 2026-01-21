@@ -32,6 +32,7 @@ import torch
 from torch import nn
 from transformers.models.glm4_moe import Glm4MoeConfig
 
+from vllm import envs
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
@@ -84,6 +85,7 @@ class Glm4MoeMLP(nn.Module):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
+        disable_tp: bool = False,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -91,6 +93,7 @@ class Glm4MoeMLP(nn.Module):
             [intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
@@ -99,6 +102,7 @@ class Glm4MoeMLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             reduce_results=reduce_results,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":
@@ -174,6 +178,7 @@ class Glm4MoE(nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
+                disable_tp=envs.VLLM_SHARED_EXPERT_DISABLE_TP,
             )
         else:
             self.shared_experts = None

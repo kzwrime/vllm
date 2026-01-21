@@ -24,6 +24,7 @@ import torch
 from torch import nn
 from transformers import Llama4TextConfig
 
+from vllm import envs
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -100,6 +101,7 @@ class Llama4MoE(nn.Module):
             prefix=f"{prefix}.router",
         )
 
+        disable_tp = self.is_sequence_parallel or envs.VLLM_SHARED_EXPERT_DISABLE_TP
         self.shared_expert = LlamaMLP(
             hidden_size=config.hidden_size,
             intermediate_size=intermediate_size_moe,
@@ -108,7 +110,7 @@ class Llama4MoE(nn.Module):
             bias=False,
             prefix=f"{prefix}.shared_expert",
             reduce_results=False,
-            disable_tp=self.is_sequence_parallel,
+            disable_tp=disable_tp,
         )
 
         # Load balancing settings.

@@ -1592,6 +1592,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD": lambda: int(
         int(os.getenv("VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD", 256))
     ),
+    # Disables tensor parallelism for shared_expert internal linear layers
+    # When enabled, all shared_expert MLP layers will have disable_tp=True
+    "VLLM_SHARED_EXPERT_DISABLE_TP": lambda: bool(
+        int(os.getenv("VLLM_SHARED_EXPERT_DISABLE_TP", "0"))
+    ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file
     #     Safe for multiple vllm serve processes accessing the same torch compile cache.

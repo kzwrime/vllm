@@ -32,6 +32,7 @@ import torch.nn.functional as F
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 
+from vllm import envs
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -180,6 +181,7 @@ class BailingMLP(nn.Module):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool | None = True,
         prefix: str = "",
+        disable_tp: bool = False,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -187,6 +189,7 @@ class BailingMLP(nn.Module):
             [intermediate_size] * 2,
             bias=config.use_bias,
             quant_config=quant_config,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
@@ -195,6 +198,7 @@ class BailingMLP(nn.Module):
             bias=config.use_bias,
             quant_config=quant_config,
             reduce_results=reduce_results,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.down_proj",
         )
         self.act_fn = SiluAndMul()
@@ -281,6 +285,7 @@ class BailingMoE(nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
+                disable_tp=envs.VLLM_SHARED_EXPERT_DISABLE_TP,
             )
         else:
             self.shared_experts = None

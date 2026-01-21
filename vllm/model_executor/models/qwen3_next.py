@@ -10,6 +10,7 @@ from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
 
+from vllm import envs
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
@@ -162,6 +163,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 reduce_results=False,
                 expert_gate=self.shared_expert_gate,
                 prefix=f"{prefix}.shared_expert",
+                disable_tp=envs.VLLM_SHARED_EXPERT_DISABLE_TP,
             )
         else:
             self.shared_expert = None

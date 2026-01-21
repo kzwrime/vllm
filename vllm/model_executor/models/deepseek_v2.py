@@ -32,6 +32,7 @@ import torch
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
@@ -193,6 +194,7 @@ class DeepseekV2MLP(nn.Module):
         reduce_results: bool = True,
         is_sequence_parallel=False,
         prefix: str = "",
+        disable_tp: bool = False,
     ) -> None:
         super().__init__()
 
@@ -200,12 +202,13 @@ class DeepseekV2MLP(nn.Module):
         # across the ranks within the tp_group. In this case the weights are
         # replicated and no collective ops are needed.
         # Otherwise we use standard TP with an allreduce at the end.
+        disable_tp = is_sequence_parallel or disable_tp
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
-            disable_tp=is_sequence_parallel,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
@@ -214,7 +217,7 @@ class DeepseekV2MLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             reduce_results=reduce_results,
-            disable_tp=is_sequence_parallel,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":
@@ -303,6 +306,7 @@ class DeepseekV2MoE(nn.Module):
                 is_sequence_parallel=self.is_sequence_parallel,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
+                disable_tp=envs.VLLM_SHARED_EXPERT_DISABLE_TP,
             )
 
         self.experts = SharedFusedMoE(

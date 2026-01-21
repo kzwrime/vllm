@@ -9,6 +9,7 @@ from itertools import islice
 import torch
 from torch import nn
 
+from vllm import envs
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
@@ -117,6 +118,7 @@ class AfmoeMoE(nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
+                disable_tp=envs.VLLM_SHARED_EXPERT_DISABLE_TP,
             )
 
         # Routed experts using SharedFusedMoE

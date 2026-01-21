@@ -32,6 +32,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
+from vllm import envs
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
@@ -88,6 +89,7 @@ class Ernie4_5_MoeMLP(nn.Module):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         prefix: str = "",
+        disable_tp: bool = False,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -95,6 +97,7 @@ class Ernie4_5_MoeMLP(nn.Module):
             [intermediate_size] * 2,
             bias=use_bias,
             quant_config=quant_config,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
@@ -103,6 +106,7 @@ class Ernie4_5_MoeMLP(nn.Module):
             bias=use_bias,
             quant_config=quant_config,
             reduce_results=reduce_results,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":
@@ -184,6 +188,7 @@ class Ernie4_5_MoeMoE(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.shared_experts",
                 reduce_results=False,
+                disable_tp=envs.VLLM_SHARED_EXPERT_DISABLE_TP,
             )
         else:
             self.shared_experts = None

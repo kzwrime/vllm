@@ -34,6 +34,7 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import Qwen2MoeConfig
 
+from vllm import envs
 from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -81,6 +82,7 @@ class Qwen2MoeMLP(nn.Module):
         reduce_results: bool = True,
         expert_gate: torch.nn.Linear | None = None,
         prefix: str = "",
+        disable_tp: bool = False,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -88,6 +90,7 @@ class Qwen2MoeMLP(nn.Module):
             [intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
@@ -96,6 +99,7 @@ class Qwen2MoeMLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             reduce_results=reduce_results,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":
@@ -157,6 +161,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
                 reduce_results=False,
                 expert_gate=self.shared_expert_gate,
                 prefix=f"{prefix}.shared_expert",
+                disable_tp=envs.VLLM_SHARED_EXPERT_DISABLE_TP,
             )
         else:
             self.shared_expert = None
@@ -167,7 +172,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
+            reduce_results=False,  # True
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
