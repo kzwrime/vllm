@@ -32,6 +32,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 # from vllm.compilation.decorators import support_torch_compile
+from vllm import envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
@@ -240,6 +241,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.shared_experts",
                 reduce_results=False,
+                disable_tp=envs.VLLM_SHARED_EXPERT_DISABLE_TP,
             )
         else:
             self.shared_experts = None

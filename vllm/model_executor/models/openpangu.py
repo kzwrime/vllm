@@ -29,6 +29,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
+from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (
@@ -106,6 +107,7 @@ class OpenPanguMLP(nn.Module):
         reduce_results: bool = True,
         is_sequence_parallel=False,
         prefix: str = "",
+        disable_tp: bool = False,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -113,7 +115,7 @@ class OpenPanguMLP(nn.Module):
             [intermediate_size] * 2,
             bias=bias,
             quant_config=quant_config,
-            disable_tp=is_sequence_parallel,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
@@ -122,7 +124,7 @@ class OpenPanguMLP(nn.Module):
             bias=bias,
             quant_config=quant_config,
             reduce_results=reduce_results,
-            disable_tp=is_sequence_parallel,
+            disable_tp=disable_tp,
             prefix=f"{prefix}.down_proj",
         )
 
@@ -196,6 +198,7 @@ class OpenPanguMoE(nn.Module):
                 is_sequence_parallel=self.is_sequence_parallel,
                 reduce_results=False,
                 prefix=f"{prefix}.shared_experts",
+                disable_tp=envs.VLLM_SHARED_EXPERT_DISABLE_TP,
             )
         else:
             self.shared_experts = None

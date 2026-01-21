@@ -239,6 +239,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
+    VLLM_SHARED_EXPERT_DISABLE_TP: bool = False
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
@@ -1616,6 +1617,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # TODO(alexm-redhat): Tune to be more dynamic based on GPU type
     "VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD": lambda: int(
         int(os.getenv("VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD", 256))
+    ),
+    # Disables tensor parallelism for shared_expert internal linear layers
+    # When enabled, all shared_expert MLP layers will have disable_tp=True
+    "VLLM_SHARED_EXPERT_DISABLE_TP": lambda: bool(
+        int(os.getenv("VLLM_SHARED_EXPERT_DISABLE_TP", "0"))
     ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file

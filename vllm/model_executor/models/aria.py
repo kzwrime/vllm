@@ -9,6 +9,7 @@ from transformers import AriaConfig, AriaTextConfig, BatchFeature
 from transformers.models.aria.modeling_aria import AriaCrossAttention
 from transformers.models.aria.processing_aria import AriaProcessor
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_rank
@@ -274,6 +275,7 @@ class AriaTextMoELayer(nn.Module):
             "silu",
             quant_config=quant_config,
             bias=config.mlp_bias,
+            disable_tp=envs.VLLM_SHARED_EXPERT_DISABLE_TP,
         )
 
         self.experts = AriaFusedMoE(
