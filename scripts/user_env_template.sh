@@ -26,11 +26,15 @@ export VLLM_USE_XCPU_LINEAR=0
 export VLLM_CPU_USE_MPI=0
 export TORCHINDUCTOR_CPP_WRAPPER=1
 export VLLM_DISABLE_TQDM_AND_MONITOR=1
+export VLLM_SHARED_EXPERT_DISABLE_TP=1
+export VLLM_ALL2ALL_BACKEND_XCPU="torch_all_to_all_single" # Fallback solution with universal compatibility
+# export VLLM_ALL2ALL_BACKEND_XCPU="mpi_alltoallv" # Requires: VLLM_CPU_USE_MPI=1
 
 _VLLM_OPTIONAL_ARGS=" "
 # _VLLM_OPTIONAL_ARGS+=" --enforce-eager"
 _VLLM_OPTIONAL_ARGS+=" --max-num-seqs 16"
 _VLLM_OPTIONAL_ARGS+=' --profiler-config {"profiler":"torch","torch_profiler_dir":"./vllm_profile","torch_profiler_record_shapes":true,"torch_profiler_with_memory":true,"torch_profiler_with_stack":true,"torch_profiler_with_flops":true,"torch_profiler_use_gzip":true,"torch_profiler_dump_cuda_time_total":true}'
+# _VLLM_OPTIONAL_ARGS+=" --enable-expert-parallel"
 
 export VLLM_OPTIONAL_ARGS=${_VLLM_OPTIONAL_ARGS}
 
