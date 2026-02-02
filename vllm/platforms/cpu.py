@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import faulthandler
 import glob
 import json
 import os
@@ -20,6 +21,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
 
+faulthandler.enable()
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
