@@ -130,7 +130,8 @@ class CpuPlatform(Platform):
         attn_selector_config: "AttentionSelectorConfig",
     ) -> str:
         if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
-            logger.info("Cannot use %s backend on CPU.", selected_backend)
+            logger.info("Using %s backend on CPU", selected_backend)
+            return selected_backend.get_path()
         if attn_selector_config.use_mla:
             raise NotImplementedError("MLA is not supported on CPU.")
         if attn_selector_config.use_sparse:
