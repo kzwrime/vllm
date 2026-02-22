@@ -44,7 +44,14 @@ class CPUWorker(Worker):
         self.profiler: Any | None = None
         profiler_config = vllm_config.profiler_config
         if profiler_config.profiler == "torch":
-            worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
+            world_rank = (
+                self.parallel_config.data_parallel_rank
+                * self.parallel_config.world_size
+                + rank
+            )
+            worker_name = (
+                f"{vllm_config.instance_id}-world-rank-{world_rank}-rank-{self.rank}"
+            )
             self.profiler = TorchProfilerWrapper(
                 profiler_config,
                 worker_name=worker_name,
