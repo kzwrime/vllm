@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -e
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../"
 
 ENV_FILE="$SCRIPT_DIR/common.sh"
@@ -17,6 +19,32 @@ load_env_file "$SCRIPT_DIR/mpi_get_rank_size.sh"
 
 RANK="$MPI_RANK_DETECT"
 SIZE="$MPI_SIZE_DETECT"
+
+# --- MPI Coordination Setup ---
+if [ "${VLLM_USE_MPI_COORD:-0}" == "1" ]; then
+    COORD_PORT=${VLLM_MPI_COORD_PORT:-15555}
+    COORD_SCRIPT="$SCRIPT_DIR/mpi_coord_setup.py"
+    export VLLM_MPI_ENV_EXPORT_FILE="/tmp/vllm_mpi_env_rank_${RANK}.sh"
+
+    echo "--- 🔗 MPI Coordination (Rank $RANK) ---"
+
+    # Run client to send/receive topology info
+    python3 "$COORD_SCRIPT" \
+        --client \
+        --port $COORD_PORT \
+        --rank $RANK \
+        --ip "$VLLM_LOOPBACK_IP"
+
+    # Source the exported environment variables
+    if [ -f "$VLLM_MPI_ENV_EXPORT_FILE" ]; then
+        echo "Loading environment variables from $VLLM_MPI_ENV_EXPORT_FILE"
+        source "$VLLM_MPI_ENV_EXPORT_FILE"
+    else
+        echo "ERROR: Environment export file not found!"
+        exit 1
+    fi
+    echo ""
+fi
 
 echo "--- 📝 vLLM 服务配置参数检查与设置 ---"
 
@@ -46,12 +74,16 @@ if (( USER_VLLM_PP_SIZE * USER_VLLM_TP_SIZE != USER_VLLM_MPC_SIZE )); then
     exit 1
 fi
 
+# Calculate DP_RANK and MPC_RANK (keep original static calculation)
 DP_RANK=$((RANK / USER_VLLM_MPC_SIZE))
 MPC_RANK=$((RANK % USER_VLLM_MPC_SIZE))
 MPC_INNER_RANK=$((RANK % USER_VLLM_MP_RPC_WORKER_PER_NODE))
 
-# TMP_IP_END=$((11 + DP_RANK * USER_VLLM_MPC_SIZE))
-# export ExecutorIP="172.33.0.${TMP_IP_END}"
+# ExecutorIP is set by coordination script if enabled, otherwise use original calculation
+# if [ "${VLLM_USE_MPI_COORD:-0}" != "1" ]; then
+#     TMP_IP_END=$((11 + DP_RANK * USER_VLLM_MPC_SIZE))
+#     export ExecutorIP="172.33.0.${TMP_IP_END}"
+# fi
 check_and_print_env "ExecutorIP"
 
 export VLLM_MP_RPC_READY_BASE_PORT=$((28888 + DP_RANK * USER_VLLM_MPC_SIZE))

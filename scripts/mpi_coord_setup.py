@@ -1,0 +1,214 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+MPI Rank Coordination Script for vLLM
+
+Simple master-worker architecture for IP address coordination:
+- Server: Runs on API server host, collects rank/IP info from all workers
+- Client: Each MPI rank sends its rank and IP, receives topology
+
+Environment Variables Set:
+  - USER_VLLM_DATA_PARALLEL_ADDRESS: IP of DP rank 0
+  - VLLM_DP_MASTER_WORKER_IP: IP of DP rank 0, worker 0
+  - ExecutorIP: IP for each MPC group's first rank
+
+Control:
+  - Enable: export VLLM_USE_MPI_COORD=1 in user_env.sh
+  - Port: export VLLM_MPI_COORD_PORT=15555 (optional)
+"""
+
+import argparse
+import json
+import os
+import socket
+import sys
+import time
+
+
+def server_main(host, port, expected_ranks, timeout=300):
+    """Server: collect rank info from all workers and broadcast topology."""
+    rank_ips = {}
+    start_time = time.time()
+
+    print(f"[Server] Listening on {host}:{port}, expecting {expected_ranks} ranks")
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((host, port))
+    sock.listen(expected_ranks)
+    sock.settimeout(1.0)
+
+    # Phase 1: Collect all ranks
+    while len(rank_ips) < expected_ranks:
+        if time.time() - start_time > timeout:
+            print(f"[Server] Timeout: received {len(rank_ips)}/{expected_ranks}")
+            sock.close()
+            sys.exit(1)
+
+        try:
+            client, _ = sock.accept()
+            data = json.loads(client.recv(4096).decode())
+            rank, ip = data["rank"], data["ip"]
+            rank_ips[rank] = ip
+            print(f"[Server] Received rank {rank} at {ip}")
+            client.sendall(b'{"status":"ack"}')
+            client.close()
+        except TimeoutError:
+            continue
+
+    sock.close()
+
+    # Build topology
+    mpc_size = int(os.environ.get("USER_VLLM_MPC_SIZE", 2))
+
+    topology = {
+        "rank_ips": rank_ips,
+        "dp_rank_0_ip": rank_ips[0],
+        "dp_rank_0_worker0_ip": rank_ips[0],
+        "executor_ips": {r: ip for r, ip in rank_ips.items() if r % mpc_size == 0},
+        "mpc_size": mpc_size,
+    }
+
+    print(f"[Server] Broadcasting topology: ExecutorIPs={topology['executor_ips']}")
+
+    # Phase 2: Broadcast topology
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((host, port))
+    sock.listen(expected_ranks)
+    sock.settimeout(timeout)
+
+    for i in range(expected_ranks):
+        try:
+            client, _ = sock.accept()
+            client.recv(4096)  # consume request
+            client.sendall(json.dumps(topology).encode())
+            print(f"[Server] Sent topology to client {i + 1}/{expected_ranks}")
+            client.close()
+        except TimeoutError:
+            break
+
+    sock.close()
+    print(f"[Server] Done, served {i + 1} clients")
+
+
+def client_main(server_ip, port, rank, ip, timeout=300):
+    """Client: send rank info, receive topology, set env vars."""
+    start_time = time.time()
+
+    def connect():
+        while time.time() - start_time < timeout:
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.connect((server_ip, port))
+                return sock
+            except ConnectionRefusedError:
+                time.sleep(0.2)
+        raise TimeoutError("Cannot connect to server")
+
+    # Phase 1: Send rank info
+    print(f"[Client Rank {rank}] Sending rank info...")
+    sock = connect()
+    sock.sendall(json.dumps({"rank": rank, "ip": ip}).encode())
+    sock.recv(4096)  # ack
+    sock.close()
+
+    time.sleep(1)  # let server collect all data
+
+    # Phase 2: Get topology
+    print(f"[Client Rank {rank}] Receiving topology...")
+    sock = connect()
+    sock.sendall(b'{"action":"get"}')
+    data = b""
+    while True:
+        chunk = sock.recv(8192)
+        if not chunk:
+            break
+        data += chunk
+        try:
+            topology = json.loads(data.decode())
+            break
+        except json.JSONDecodeError:
+            continue
+    sock.close()
+
+    # Calculate env vars
+    mpc_size = topology["mpc_size"]
+    dp_rank = rank // mpc_size
+    mpc_group_first_rank = dp_rank * mpc_size
+
+    # JSON keys are strings
+    executor_ips = topology["executor_ips"]
+    executor_ip = executor_ips.get(str(mpc_group_first_rank)) or executor_ips.get(
+        mpc_group_first_rank, ip
+    )
+
+    env_vars = {
+        "USER_VLLM_DATA_PARALLEL_ADDRESS": topology["dp_rank_0_ip"],
+        "VLLM_DP_MASTER_WORKER_IP": topology["dp_rank_0_worker0_ip"],
+        "ExecutorIP": executor_ip,
+    }
+
+    for k, v in env_vars.items():
+        print(f"[Client Rank {rank}]   {k}={v}")
+
+    # Export to file
+    export_file = os.environ.get(
+        "VLLM_MPI_ENV_EXPORT_FILE", f"/tmp/vllm_mpi_env_rank_{rank}.sh"
+    )
+    with open(export_file, "w") as f:
+        f.write("# Generated by mpi_coord_setup.py\n")
+        for k, v in env_vars.items():
+            f.write(f'export {k}="{v}"\n')
+    print(f"[Client Rank {rank}] Exported to {export_file}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="MPI Rank Coordination for vLLM")
+    parser.add_argument("--server", action="store_true", help="Run in server mode")
+    parser.add_argument("--client", action="store_true", help="Run in client mode")
+    parser.add_argument(
+        "--server-ip",
+        default=None,
+        help="Server IP (default: USER_VLLM_DATA_PARALLEL_RPC_IP)",
+    )
+    parser.add_argument("--port", type=int, default=15555, help="Server port")
+    parser.add_argument("--timeout", type=int, default=300, help="Timeout in seconds")
+    parser.add_argument(
+        "--expected-ranks", type=int, help="Expected ranks (server only)"
+    )
+    parser.add_argument("--rank", type=int, help="MPI rank (client only)")
+    parser.add_argument("--ip", type=str, help="IP address (client only)")
+
+    args = parser.parse_args()
+
+    if args.server:
+        if not args.expected_ranks:
+            print("--expected-ranks required for server mode")
+            sys.exit(1)
+        server_main(
+            args.server_ip
+            or os.environ.get("USER_VLLM_DATA_PARALLEL_RPC_IP", "0.0.0.0"),
+            args.port,
+            args.expected_ranks,
+            args.timeout,
+        )
+
+    elif args.client:
+        print(f"[Client Rank {args.rank}] local ip: {args.ip}")
+        if args.rank is None or args.ip is None:
+            print("--rank and --ip required for client mode")
+            sys.exit(1)
+        client_main(
+            args.server_ip
+            or os.environ.get("USER_VLLM_DATA_PARALLEL_RPC_IP", "127.0.0.1"),
+            args.port,
+            args.rank,
+            args.ip,
+            args.timeout,
+        )
+
+
+if __name__ == "__main__":
+    main()

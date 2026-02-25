@@ -12,6 +12,12 @@ export USER_VLLM_DATA_PARALLEL_RPC_PORT=13345
 export USER_VLLM_PORT=14800
 export VLLM_CPU_KVCACHE_SPACE=4 # KV Cache Size
 
+# 设置 VLLM_USE_MPI_COORD=1 时，会通过额外的 python 脚本，自动协调并设置以下变量
+# - USER_VLLM_DATA_PARALLEL_ADDRESS
+# - VLLM_DP_MASTER_WORKER_IP
+# - ExecutorIP
+export VLLM_USE_MPI_COORD=0
+
 # IP addresses vary across different TP groups.
 export ExecutorIP=172.33.0.11 
 export USER_VLLM_MPC_SIZE=2
@@ -22,7 +28,7 @@ export VLLM_LOOPBACK_IP=$(hostname -I | awk '{print $1}')
 # export VLLM_LOOPBACK_IP=$(ifconfig eth0 | grep "inet " | awk '{print ^C}')
 
 export VLLM_USE_XCPU_LINEAR=0
-
+# export TORCH_XCPU_ENABLE_CHECK=0
 export VLLM_CPU_USE_MPI=0
 export TORCHINDUCTOR_CPP_WRAPPER=1
 export VLLM_DISABLE_TQDM_AND_MONITOR=1
@@ -35,6 +41,8 @@ _VLLM_OPTIONAL_ARGS=" "
 _VLLM_OPTIONAL_ARGS+=" --max-num-seqs 16"
 _VLLM_OPTIONAL_ARGS+=' --profiler-config {"profiler":"torch","torch_profiler_dir":"./vllm_profile","torch_profiler_record_shapes":true,"torch_profiler_with_memory":true,"torch_profiler_with_stack":true,"torch_profiler_with_flops":true,"torch_profiler_use_gzip":true,"torch_profiler_dump_cuda_time_total":true}'
 # _VLLM_OPTIONAL_ARGS+=" --enable-expert-parallel"
+# _VLLM_OPTIONAL_ARGS+=" --no-enable-prefix-caching"
+# _VLLM_OPTIONAL_ARGS+=" --load-format dummy"
 
 export VLLM_OPTIONAL_ARGS=${_VLLM_OPTIONAL_ARGS}
 

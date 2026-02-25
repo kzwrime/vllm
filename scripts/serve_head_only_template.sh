@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -e
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 ENV_FILE="$SCRIPT_DIR/common.sh"
@@ -14,6 +16,35 @@ fi
 load_env_file "$SCRIPT_DIR/env.sh"
 load_env_file "$SCRIPT_DIR/user_env.sh"
 
+# --- MPI Coordination Setup ---
+# Start the coordination server if enabled
+if [ "${VLLM_USE_MPI_COORD:-0}" == "1" ]; then
+    COORD_PORT=${VLLM_MPI_COORD_PORT:-15555}
+    COORD_SCRIPT="$SCRIPT_DIR/mpi_coord_setup.py"
+    COORD_LOG="$SCRIPT_DIR/../logs/coord_server.log"
+
+    mkdir -p "$(dirname "$COORD_LOG")"
+
+    echo ""
+    echo "--- 🔗 MPI Coordination Server ---"
+    echo "Starting MPI coordination server on port $COORD_PORT..."
+    echo "This server will collect rank information from all workers."
+
+    # Get expected number of ranks from environment or calculate
+    EXPECTED_RANKS=${VLLM_MPI_COORD_EXPECTED_RANKS:-$((USER_VLLM_DATA_PARALLEL_SIZE * USER_VLLM_MPC_SIZE))}
+
+    # Start coordination server in background
+    python3 "$COORD_SCRIPT" --server \
+        --port $COORD_PORT \
+        --expected-ranks $EXPECTED_RANKS \
+        > "$COORD_LOG" 2>&1
+
+    COORD_SERVER_PID=$!
+    echo "Coordination server started with PID: $COORD_SERVER_PID"
+    echo "Log file: $COORD_LOG"
+    echo "Waiting for workers to connect..."
+    echo ""
+fi
 
 echo "--- 📝 vLLM 服务配置参数检查与设置 ---"
 
