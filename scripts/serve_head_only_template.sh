@@ -33,16 +33,16 @@ if [ "${VLLM_USE_MPI_COORD:-0}" == "1" ]; then
     # Get expected number of ranks from environment or calculate
     EXPECTED_RANKS=${VLLM_MPI_COORD_EXPECTED_RANKS:-$((USER_VLLM_DATA_PARALLEL_SIZE * USER_VLLM_MPC_SIZE))}
 
-    # Start coordination server in background
+    # Start coordination server (runs until all workers connect)
+    export VLLM_MPI_ENV_EXPORT_FILE="/tmp/vllm_mpi_env_server.sh"
     python3 "$COORD_SCRIPT" --server \
         --port $COORD_PORT \
         --expected-ranks $EXPECTED_RANKS \
         > "$COORD_LOG" 2>&1
 
-    COORD_SERVER_PID=$!
-    echo "Coordination server started with PID: $COORD_SERVER_PID"
-    echo "Log file: $COORD_LOG"
-    echo "Waiting for workers to connect..."
+    # Source the exported environment variables
+    echo "Loading environment variables from $VLLM_MPI_ENV_EXPORT_FILE"
+    source "$VLLM_MPI_ENV_EXPORT_FILE"
     echo ""
 fi
 
