@@ -767,11 +767,7 @@ class FusedMoE(CustomOp):
 
     @property
     def use_dp_chunking(self) -> bool:
-        return (
-            self.moe_parallel_config.use_pplx_kernels
-            or self.moe_parallel_config.use_deepep_ll_kernels
-            or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
-        ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
+        return self.use_ep and self.ep_size > 1 and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
     @property
     def is_internal_router(self) -> bool:
@@ -1514,7 +1510,7 @@ class FusedMoE(CustomOp):
         self.ensure_moe_quant_config_init()
         return self.quant_method.moe_quant_config
 
-    def ensure_dp_chunking_init(self):
+    def ensure_dp_chunking_init(self, device: torch.device):
         if not self.use_dp_chunking or self.batched_hidden_states is not None:
             return
 
@@ -1531,13 +1527,13 @@ class FusedMoE(CustomOp):
             logits_shape = (moe.max_num_tokens, self.logical_num_experts)
 
         self.batched_hidden_states = torch.zeros(
-            states_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
+            states_shape, dtype=moe.in_dtype, device=device
         )
 
         self.batched_router_logits = torch.zeros(
             logits_shape,
             dtype=moe.router_logits_dtype,
-            device=torch.cuda.current_device(),
+            device=device,
         )
 
     def _select_experts(
@@ -1870,7 +1866,7 @@ class FusedMoE(CustomOp):
         assert self.quant_method is not None
 
         self.ensure_moe_quant_config_init()
-        self.ensure_dp_chunking_init()
+        self.ensure_dp_chunking_init(hidden_states.device)
 
         has_separate_shared_experts = (
             not isinstance(self.quant_method, FusedMoEModularMethod)

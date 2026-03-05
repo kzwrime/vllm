@@ -1115,7 +1115,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # units.
     "VLLM_MOE_DP_CHUNK_SIZE": lambda: int(os.getenv("VLLM_MOE_DP_CHUNK_SIZE", "256")),
     "VLLM_ENABLE_MOE_DP_CHUNK": lambda: bool(
-        int(os.getenv("VLLM_ENABLE_MOE_DP_CHUNK", "1"))
+        int(os.getenv("VLLM_ENABLE_MOE_DP_CHUNK", "0"))
     ),
     # Randomize inputs during dummy runs when using Data Parallel
     "VLLM_RANDOMIZE_DP_DUMMY_INPUTS": lambda: os.environ.get(
