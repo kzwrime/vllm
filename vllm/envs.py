@@ -259,6 +259,7 @@ if TYPE_CHECKING:
     VLLM_USE_CPU_SHM_DIST: bool = True
     VLLM_USE_XCPU_LINEAR: bool = False
     VLLM_DISABLE_TQDM_AND_MONITOR: bool = False
+    VLLM_CPU_MOCK_LINEAR: bool = False
 
 
 def get_default_cache_root():
@@ -1634,6 +1635,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_TQDM_AND_MONITOR": lambda: bool(
         int(os.getenv("VLLM_DISABLE_TQDM_AND_MONITOR", "0"))
     ),
+    "VLLM_CPU_MOCK_LINEAR": lambda: bool(int(os.getenv("VLLM_CPU_MOCK_LINEAR", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
@@ -1760,6 +1762,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CPU_KVCACHE_SPACE",
         "VLLM_CPU_OMP_THREADS_BIND",
         "VLLM_CPU_NUM_OF_RESERVED_CPU",
+        "VLLM_CPU_MOCK_LINEAR",
         "VLLM_CPU_MOE_PREPACK",
         "VLLM_CPU_SGL_KERNEL",
         "VLLM_TEST_FORCE_LOAD_FORMAT",

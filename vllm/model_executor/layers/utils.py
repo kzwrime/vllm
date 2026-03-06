@@ -198,7 +198,40 @@ def dispatch_cpu_unquantized_gemm(
 ) -> None:
     N, K = layer.weight.size()
     dtype = layer.weight.dtype
-    if envs.VLLM_CPU_SGL_KERNEL and check_cpu_sgl_kernel(N, K, dtype):
+    if envs.VLLM_CPU_MOCK_LINEAR:
+        # Extreme simplification mode for performance testing:
+        # keep only 1 columns of weights
+        # 1. Transform Weight: take only first 1 columns and clone
+        # to ensure original large weights can be GC'd
+        # Result dimension: (N, 1)
+        stub_weight = layer.weight[:, :1].detach().clone()
+
+        # 2. Define mock operator
+        # Logic: slice input x to first 4 dimensions and perform
+        # linear transformation with stub_weight
+        layer.cpu_linear = lambda x, weight, bias: torch.nn.functional.linear(
+            x[..., :1],  # dynamically slice input
+            stub_weight,
+            bias,
+        )
+
+        # 3. Completely remove original weights
+        if remove_weight:
+            # Free memory: set original weight to empty to reclaim
+            # GB-level space
+            layer.weight = torch.nn.Parameter(torch.empty(0, 0), requires_grad=False)
+
+        logger.info(
+            (
+                "Mock linear enabled: Weight downsized from "
+                "(%s, %s) to (%s, 1) for performance testing."
+            ),
+            N,
+            K,
+            N,
+        )
+        return
+    elif envs.VLLM_CPU_SGL_KERNEL and check_cpu_sgl_kernel(N, K, dtype):
         packed_weight = torch.ops._C.convert_weight_packed(layer.weight)
         if getattr(layer, "bias", None) is not None:
             bias_f32 = layer.bias.to(torch.float32)
