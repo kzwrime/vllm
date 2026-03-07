@@ -234,4 +234,4 @@ vllm/grpc/vllm_engine_pb2_grpc.py
 vllm/grpc/vllm_engine_pb2.pyi
 
 profile
-logs
+vllm_profile
