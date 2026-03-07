@@ -35,6 +35,10 @@ export TORCHINDUCTOR_CPP_WRAPPER=1
 export VLLM_DISABLE_TQDM_AND_MONITOR=1
 export VLLM_SHARED_EXPERT_DISABLE_TP=1
 export VLLM_ENABLE_MOE_DP_CHUNK=1
+
+# 开启 torch_all_to_all_single / mpi_alltoallv 时，必须关闭，因此设置为总是关闭即可
+export VLLM_ENABLE_SEQUENCE_PARALLEL_MOE=0 
+
 export VLLM_ALL2ALL_BACKEND_XCPU="torch_all_to_all_single" # Fallback solution with universal compatibility
 # export VLLM_ALL2ALL_BACKEND_XCPU="mpi_alltoallv" # Requires: VLLM_CPU_USE_MPI=1
 
