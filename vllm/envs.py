@@ -1638,6 +1638,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use _CPUSHMDistributed in CpuCommunicator
     "VLLM_USE_CPU_SHM_DIST": lambda: bool(int(os.getenv("VLLM_USE_CPU_SHM_DIST", "1"))),
     "VLLM_USE_XCPU_LINEAR": lambda: bool(int(os.getenv("VLLM_USE_XCPU_LINEAR", "0"))),
+    "VLLM_USE_XCPU_TOPK_SOFTMAX": lambda: bool(
+        int(os.getenv("VLLM_USE_XCPU_TOPK_SOFTMAX", "0"))
+    ),
     "VLLM_DISABLE_TQDM_AND_MONITOR": lambda: bool(
         int(os.getenv("VLLM_DISABLE_TQDM_AND_MONITOR", "0"))
     ),

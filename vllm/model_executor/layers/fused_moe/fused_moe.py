@@ -1356,9 +1356,35 @@ def cpu_topk_softmax(
     return topk_weights, topk_indices
 
 
+def xcpu_topk_softmax(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    XCPU implementation of topk_softmax using torch_xcpu.ops.cpu_topk_softmax.
+    """
+    import torch_xcpu
+
+    torch_xcpu.ops.topk_softmax(
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+    )
+
+    return topk_weights, topk_indices
+
+
 def dispatch_topk_func(
     use_rocm_aiter: bool = False,
 ) -> Callable[..., tuple[torch.Tensor, ...]]:
+    # Check if XCPU topk softmax is enabled via environment variable
+    if envs.VLLM_USE_XCPU_TOPK_SOFTMAX:
+        return xcpu_topk_softmax
     if current_platform.is_cpu():
         return cpu_topk_softmax
     if use_rocm_aiter:
