@@ -234,4 +234,7 @@ vllm/grpc/vllm_engine_pb2_grpc.py
 vllm/grpc/vllm_engine_pb2.pyi
 
 profile
-vllm_profile
+vllm_profile*
+logs
+**/torch_compile_cache
+**/torch_compile_debug
