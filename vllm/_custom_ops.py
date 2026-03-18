@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from enum import IntEnum
 from typing import TYPE_CHECKING, Literal
 
 import torch
@@ -2902,6 +2903,13 @@ def onednn_scaled_mm(
     return output
 
 
+class cpu_attention_ISA(IntEnum):
+    AMX = 0
+    VEC = 1
+    VEC16 = 2
+    NEON = 3
+
+
 def cpu_attn_get_scheduler_metadata(
     num_reqs: int,
     num_heads: int,
@@ -2912,7 +2920,7 @@ def cpu_attn_get_scheduler_metadata(
     query_start_loc: torch.Tensor,
     causal: bool,
     sliding_window_size: int,
-    isa: str,
+    isa: cpu_attention_ISA,
     enable_kv_split: bool,
 ) -> torch.Tensor:
     sheduler_metadata = torch.ops._C.get_scheduler_metadata(
@@ -2934,32 +2942,41 @@ def cpu_attn_get_scheduler_metadata(
 def cpu_attn_reshape_and_cache(
     key: torch.Tensor,
     value: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
+    kv_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
-    isa: str,
+    isa: cpu_attention_ISA,
 ) -> None:
     torch.ops._C.cpu_attn_reshape_and_cache(
         key,
         value,
-        key_cache,
-        value_cache,
+        kv_cache,
         slot_mapping,
         isa,
     )
 
 
+@register_fake("_C::cpu_attn_reshape_and_cache")
+def cpu_attn_reshape_and_cache_fake(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    isa: cpu_attention_ISA,
+):
+    return
+
+
 def cpu_attention_with_kv_cache(
     query: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
+    kv_cache: torch.Tensor,
     output: torch.Tensor,
     query_start_loc: torch.Tensor,
     seq_lens: torch.Tensor,
     scale: float,
     causal: bool,
     alibi_slopes: torch.Tensor | None,
-    sliding_window: tuple[int, int],
+    sliding_window_left: int,
+    sliding_window_right: int,
     block_table: torch.Tensor,
     softcap: float,
     scheduler_metadata: torch.Tensor,
@@ -2967,21 +2984,40 @@ def cpu_attention_with_kv_cache(
 ) -> None:
     torch.ops._C.cpu_attention_with_kv_cache(
         query,
-        key_cache,
-        value_cache,
+        kv_cache,
         output,
         query_start_loc,
         seq_lens,
         scale,
         causal,
         alibi_slopes,
-        sliding_window[0],
-        sliding_window[1],
+        sliding_window_left,
+        sliding_window_right,
         block_table,
         softcap,
         scheduler_metadata,
         s_aux,
     )
+
+
+@register_fake("_C::cpu_attention_with_kv_cache")
+def cpu_attention_with_kv_cache_fake(
+    query: torch.Tensor,
+    kv_cache: torch.Tensor,
+    output: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    scale: float,
+    causal: bool,
+    alibi_slopes: torch.Tensor | None,
+    sliding_window_left: int,
+    sliding_window_right: int,
+    block_table: torch.Tensor,
+    softcap: float,
+    scheduler_metadata: torch.Tensor,
+    s_aux: torch.Tensor | None,
+) -> None:
+    return
 
 
 def cpu_gemm_wna16(

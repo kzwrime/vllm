@@ -6,6 +6,7 @@ from typing import ClassVar
 import torch
 
 from vllm import _custom_ops as ops
+from vllm._custom_ops import cpu_attention_ISA
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
@@ -35,6 +36,7 @@ class CPUAttentionBackend(AttentionBackend):
         torch.bfloat16,
         torch.float32,
     ]
+    use_direct_unified_op: bool = True
 
     @classmethod
     def get_supported_dtypes(cls) -> list[torch.dtype]:
@@ -84,7 +86,7 @@ class CPUAttentionBackend(AttentionBackend):
 
 @dataclass
 class CPUAttentionMetadata:
-    isa: str
+    isa: cpu_attention_ISA
     num_actual_tokens: int  # Number of tokens excluding padding.
     max_query_len: int
     query_start_loc: torch.Tensor
@@ -313,7 +315,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
 
         # For decoder and cross-attention, use KV cache, size are
         # [num_blocks, num_kv_heads, block_size, head_size]
-        key_cache, value_cache = kv_cache.unbind(0)
+        # key_cache, value_cache = kv_cache.unbind(0)
 
         # key and value may be None in the case of cross attention. They are
         # calculated once based on the output from the encoder and then cached
@@ -326,8 +328,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
             ops.cpu_attn_reshape_and_cache(
                 key,
                 value,
-                key_cache,
-                value_cache,
+                kv_cache,
                 attn_metadata.slot_mapping,
                 attn_metadata.isa,
             )
@@ -347,16 +348,16 @@ class CPUAttentionBackendImpl(AttentionImpl):
 
         if num_actual_tokens > 0:
             ops.cpu_attention_with_kv_cache(
-                query=query[:num_actual_tokens],
-                key_cache=key_cache,
-                value_cache=value_cache,
-                output=output[:num_actual_tokens],  # type: ignore
+                query=query,  # [:num_actual_tokens]
+                kv_cache=kv_cache,
+                output=output,  # [:num_actual_tokens]
                 query_start_loc=attn_metadata.query_start_loc,
                 seq_lens=attn_metadata.seq_lens,
                 scale=self.scale,
                 causal=attn_metadata.causal,
                 alibi_slopes=self.alibi_slopes,  # type: ignore
-                sliding_window=self.sliding_window,
+                sliding_window_left=self.sliding_window[0],
+                sliding_window_right=self.sliding_window[1],
                 block_table=attn_metadata.block_table,
                 softcap=self.logits_soft_cap,
                 scheduler_metadata=attn_metadata.scheduler_metadata,
@@ -486,16 +487,16 @@ def _make_sliding_window_bias(
 
 def _get_attn_isa(
     dtype: torch.dtype, block_size: int, head_size: int | None = None
-) -> str:
+) -> cpu_attention_ISA:
     if head_size is not None and head_size % 32 != 0 and head_size % 16 == 0:
-        return "vec16"
+        return cpu_attention_ISA.VEC16
     supports_amx = torch._C._cpu._is_amx_tile_supported()
     if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
-        return "amx"
+        return cpu_attention_ISA.AMX
     elif block_size % 32 == 0:
         if current_platform.get_cpu_architecture() == CpuArchEnum.ARM:
-            return "neon"
+            return cpu_attention_ISA.NEON
         else:
-            return "vec"
+            return cpu_attention_ISA.VEC
     else:
-        return "vec16"
+        return cpu_attention_ISA.VEC16

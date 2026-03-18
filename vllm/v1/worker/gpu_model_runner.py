@@ -4196,7 +4196,7 @@ class GPUModelRunner(
         self,
         num_tokens: int,
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
-        force_attention: bool = False,
+        force_attention: bool = True,
         uniform_decode: bool = False,
         allow_microbatching: bool = True,
         skip_eplb: bool = False,

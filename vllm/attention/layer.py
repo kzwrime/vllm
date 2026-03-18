@@ -385,9 +385,14 @@ class Attention(nn.Module, AttentionLayerBase):
                     self, query, key, value, self_kv_cache, attn_metadata, output=output
                 )
             else:
-                torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name
-                )
+                if getattr(self.attn_backend, "use_direct_unified_op", None):
+                    unified_attention_with_output(
+                        query, key, value, output, self.layer_name
+                    )
+                else:
+                    torch.ops.vllm.unified_attention_with_output(
+                        query, key, value, output, self.layer_name
+                    )
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
