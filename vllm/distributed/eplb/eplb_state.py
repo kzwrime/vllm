@@ -27,6 +27,7 @@ physical experts.
 """
 
 import threading
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -53,6 +54,38 @@ from .rebalance_execute import (
 )
 
 logger = init_logger(__name__)
+
+
+class UnifiedEvent:
+    def __init__(self):
+        self.is_cuda = torch.cuda.is_available()
+
+        if self.is_cuda:
+            self.event = torch.cuda.Event(enable_timing=True)
+        else:
+            self.event = None
+            self.cpu_time = 0.0
+
+    def record(self):
+        if self.is_cuda:
+            self.event.record()
+        else:
+            # CPU 上直接获取当前时间（单位：秒）
+            self.cpu_time = time.perf_counter()
+
+    def elapsed_time(self, end_event):
+        if self.is_cuda:
+            # CUDA 的 elapsed_time 返回毫秒
+            return self.event.elapsed_time(end_event.event)
+        else:
+            # CPU 计算差值并转为毫秒
+            return (end_event.cpu_time - self.cpu_time) * 1000
+
+    def synchronize(self):
+        if self.is_cuda:
+            torch.cuda.synchronize()
+        else:
+            pass
 
 
 @dataclass
@@ -705,8 +738,8 @@ class EplbState:
         is_main_rank = ep_rank == 0
         if is_main_rank:
             if not self.is_async or is_profile:
-                start_event = torch.cuda.Event(enable_timing=True)
-                end_event = torch.cuda.Event(enable_timing=True)
+                start_event = UnifiedEvent()
+                end_event = UnifiedEvent()
                 start_event.record()
             logger.info(
                 "Rearranging experts %s %s...",

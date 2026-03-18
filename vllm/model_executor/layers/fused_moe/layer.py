@@ -31,11 +31,21 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe import GroupedTopk
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+    FusedMoEMethodBase,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
+    FusedMoEModularMethod,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
 from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimulator
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
@@ -49,30 +59,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
-if current_platform.is_cuda_alike():
-    from .fused_moe import eplb_map_to_physical_and_record
-else:
-
-    def _eplb_map_to_physical_and_record(
-        topk_ids: torch.Tensor,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> torch.Tensor:
-        # CPU fallback: no EPLB so just return as is
-        return topk_ids
-
-    eplb_map_to_physical_and_record = _eplb_map_to_physical_and_record
-from vllm.model_executor.layers.fused_moe.fused_moe import GroupedTopk
-from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
-    FusedMoEMethodBase,
-)
-from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
-    FusedMoEModularMethod,
-)
-from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
-    UnquantizedFusedMoEMethod,
-)
+from .fused_moe import eplb_map_to_physical_and_record
 
 logger = init_logger(__name__)
 
