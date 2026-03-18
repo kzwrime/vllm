@@ -30,11 +30,16 @@ def start_async_worker(
     ep_group = get_ep_group().device_group
     rank = ep_group.rank()
     device_index = state.cuda_device_index
+    is_cuda = torch.cuda.is_available()
 
     def thread_target() -> None:
-        assert device_index is not None
-        torch.cuda.set_device(device_index)
-        cuda_stream = torch.cuda.Stream(device=device_index)
+        if is_cuda:
+            assert device_index is not None
+            torch.cuda.set_device(device_index)
+            cuda_stream = torch.cuda.Stream(device=device_index)
+        else:
+            cuda_stream = None
+
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
@@ -101,8 +106,9 @@ async def transfer_run_periodically(
                             cuda_stream=cuda_stream,
                             rank_mapping=rank_mapping,
                         )
-                        event = torch.cuda.Event(blocking=False)
-                        cuda_stream.record_event(event)
+                        event = torch.cuda.Event(blocking=False) if torch.cuda.is_available() else None
+                        if event is not None and cuda_stream is not None:
+                            cuda_stream.record_event(event)
                         model_state.buffer_ready_event = event
                         model_state.ep_buffer_ready = 1
                     finally:

@@ -1019,10 +1019,12 @@ class EplbState:
             return
         try:
             assert model_state.new_physical_to_logical_map is not None
-            device_index = model_state.cuda_device_index or self.cuda_device_index
-            if model_state.buffer_ready_event is not None and device_index is not None:
-                stream = torch.cuda.current_stream(device=device_index)
-                stream.wait_event(model_state.buffer_ready_event)
+            # Wait for buffer to be ready (CUDA only)
+            if model_state.buffer_ready_event is not None and torch.cuda.is_available():
+                device_index = model_state.cuda_device_index or self.cuda_device_index
+                if device_index is not None:
+                    stream = torch.cuda.current_stream(device=device_index)
+                    stream.wait_event(model_state.buffer_ready_event)
                 model_state.buffer_ready_event = None
             expert_weights = model_state.model.expert_weights[
                 model_state.layer_to_transfer
