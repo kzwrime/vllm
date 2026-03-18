@@ -66,6 +66,12 @@ case ${PD_MODE} in
         _VLLM_OPTIONAL_ARGS+=" --enforce-eager" # 必须开启 eager 模式以支持 Chunk 逻辑
         _VLLM_OPTIONAL_ARGS+=" --enable-expert-parallel" # 开启专家并行
 
+        # _VLLM_OPTIONAL_ARGS+=" --enable-eplb"
+        # _VLLM_OPTIONAL_ARGS+=" --eplb-config.window_size 1000"
+        # _VLLM_OPTIONAL_ARGS+=" --eplb-config.step_interval 3000"
+        # _VLLM_OPTIONAL_ARGS+=" --eplb-config.num_redundant_experts 16"
+        # _VLLM_OPTIONAL_ARGS+=" --eplb-config.log_balancedness true"
+
         # 通过 DP_SIZE * MAX_BATCHED_TOKENS * min(topk, num_local_experts) 来控制 all2allv 和 MoE 缓冲区 Token 数
         # Prefill 时 DP 较少，将 MAX_BATCHED_TOKENS 调大
         MAX_BATCHED_TOKENS=4096
@@ -81,6 +87,12 @@ case ${PD_MODE} in
 
         _VLLM_OPTIONAL_ARGS+=" --enable-expert-parallel" # 开启专家并行
         
+        # _VLLM_OPTIONAL_ARGS+=" --enable-eplb"
+        # _VLLM_OPTIONAL_ARGS+=" --eplb-config.window_size 1000"
+        # _VLLM_OPTIONAL_ARGS+=" --eplb-config.step_interval 3000"
+        # _VLLM_OPTIONAL_ARGS+=" --eplb-config.num_redundant_experts 16"
+        # _VLLM_OPTIONAL_ARGS+=" --eplb-config.log_balancedness true"
+
         # 通过 DP_SIZE * MAX_BATCHED_TOKENS * min(topk, num_local_experts) 来控制 all2allv 和 MoE 缓冲区 Token 数
         # Decode 时 DP 较多，将 MAX_BATCHED_TOKENS 调小
         MAX_BATCHED_TOKENS=256
