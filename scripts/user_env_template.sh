@@ -41,6 +41,7 @@ export VLLM_ENABLE_SEQUENCE_PARALLEL_MOE=0
 
 export VLLM_ALL2ALL_BACKEND_XCPU="torch_all_to_all_single" # Fallback solution with universal compatibility
 # export VLLM_ALL2ALL_BACKEND_XCPU="mpi_alltoallv" # Requires: VLLM_CPU_USE_MPI=1
+export VLLM_MPI_ALLTOALLV_VERSION="v1"  # v2 采用新的 alltoallv_put
 
 _VLLM_OPTIONAL_ARGS=" "
 # _VLLM_OPTIONAL_ARGS+=" --enforce-eager"
