@@ -14,7 +14,7 @@ else
 fi
 
 load_env_file "$SCRIPT_DIR/env.sh"
-load_env_file "$SCRIPT_DIR/user_env.sh"
+load_user_config "$SCRIPT_DIR"
 
 # --- MPI Coordination Setup ---
 # Start the coordination server if enabled
@@ -73,12 +73,13 @@ VLLM_LOGGING_LEVEL=${USER_VLLM_LOGGING_LEVEL} vllm serve ${USER_VLLM_MODEL} \
   -pp=${USER_VLLM_PP_SIZE} \
   --distributed-executor-backend mp \
   --port ${USER_VLLM_PORT} \
+  ${USER_VLLM_EAGER_OR_NOT} \
   ${VLLM_OPTIONAL_ARGS} \
   --data-parallel-size ${USER_VLLM_DATA_PARALLEL_SIZE} \
   --data-parallel-size-local 0 \
   --data-parallel-address ${USER_VLLM_DATA_PARALLEL_ADDRESS} \
   --data-parallel-rpc-ip ${USER_VLLM_DATA_PARALLEL_RPC_IP} \
-  --data-parallel-rpc-port ${USER_VLLM_DATA_PARALLEL_RPC_PORT}
+  --data-parallel-rpc-port ${USER_VLLM_DATA_PARALLEL_RPC_PORT} 2>&1 | tee logs/vllm_head_log.txt
 
 # 检查 vLLM 命令的退出状态
 if [ $? -ne 0 ]; then

@@ -17,7 +17,7 @@ else
 fi
 
 load_env_file "$SCRIPT_DIR/env.sh"
-load_env_file "$SCRIPT_DIR/user_env.sh"
+load_user_config "$SCRIPT_DIR"
 
 # Get values from parameters
 InnerRankBase=$1

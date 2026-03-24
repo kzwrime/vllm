@@ -12,7 +12,7 @@ else
 fi
 
 load_env_file "$SCRIPT_DIR/env.sh"
-load_env_file "$SCRIPT_DIR/user_env.sh"
+load_user_config "$SCRIPT_DIR"
 
 echo "--- 📝 vLLM 服务配置参数检查与设置 ---"
 
@@ -31,6 +31,7 @@ check_and_print_env "VLLM_LOOPBACK_IP"
 
 export VLLM_USE_MP_RPC_WORKERS=1
 
+#   --port ${USER_VLLM_PORT} \
 VLLM_LOGGING_LEVEL=${USER_VLLM_LOGGING_LEVEL} vllm serve ${USER_VLLM_MODEL} \
   --headless \
   --max-model-len ${USER_VLLM_MAX_MODEL_LEN} \
@@ -40,6 +41,7 @@ VLLM_LOGGING_LEVEL=${USER_VLLM_LOGGING_LEVEL} vllm serve ${USER_VLLM_MODEL} \
   --distributed-executor-backend mp \
   --data-parallel-size ${USER_VLLM_DATA_PARALLEL_SIZE} \
   --data-parallel-size-local 1 \
+  ${USER_VLLM_EAGER_OR_NOT} \
   ${VLLM_OPTIONAL_ARGS} \
   --data-parallel-start-rank $DP_RANK \
   --data-parallel-address ${USER_VLLM_DATA_PARALLEL_ADDRESS} \

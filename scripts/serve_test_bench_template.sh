@@ -12,7 +12,7 @@ else
 fi
 
 load_env_file "$SCRIPT_DIR/env.sh"
-load_env_file "$SCRIPT_DIR/user_env.sh"
+load_user_config "$SCRIPT_DIR"
 
 # Prefill 测试
 # vllm bench serve --port ${USER_VLLM_PORT} \

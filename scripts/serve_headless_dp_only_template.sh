@@ -14,7 +14,7 @@ else
 fi
 
 load_env_file "$SCRIPT_DIR/env.sh"
-load_env_file "$SCRIPT_DIR/user_env.sh"
+load_user_config "$SCRIPT_DIR"
 
 
 echo "--- 📝 vLLM 服务配置参数检查与设置 ---"
@@ -43,6 +43,7 @@ VLLM_LOGGING_LEVEL=${USER_VLLM_LOGGING_LEVEL} vllm serve ${USER_VLLM_MODEL} \
   -pp=${USER_VLLM_PP_SIZE} \
   --distributed-executor-backend mp \
   --port ${USER_VLLM_PORT} \
+  ${USER_VLLM_EAGER_OR_NOT} \
   ${VLLM_OPTIONAL_ARGS} \
   --data-parallel-size ${USER_VLLM_DATA_PARALLEL_SIZE} \
   --data-parallel-size-local 1  \

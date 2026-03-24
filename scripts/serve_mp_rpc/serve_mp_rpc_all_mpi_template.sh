@@ -14,7 +14,7 @@ else
 fi
 
 load_env_file "$SCRIPT_DIR/env.sh"
-load_env_file "$SCRIPT_DIR/user_env.sh"
+load_user_config "$SCRIPT_DIR"
 load_env_file "$SCRIPT_DIR/mpi_get_rank_size.sh"
 
 RANK="$MPI_RANK_DETECT"
@@ -103,6 +103,7 @@ if [ $MPC_RANK -eq 0 ]; then
           --distributed-executor-backend mp \
           --data-parallel-size ${USER_VLLM_DATA_PARALLEL_SIZE} \
           --data-parallel-size-local 1 \
+          ${USER_VLLM_EAGER_OR_NOT} \
           ${VLLM_OPTIONAL_ARGS} \
           --data-parallel-start-rank ${DP_RANK} \
           --data-parallel-address ${USER_VLLM_DATA_PARALLEL_ADDRESS} \
@@ -120,7 +121,7 @@ echo "[RANK=$RANK][DP_RANK=$DP_RANK][MPC_RANK=$MPC_RANK] Starting vLLM mp_rpc_wo
     VLLM_LOGGING_LEVEL=${USER_VLLM_LOGGING_LEVEL} python3 "$SCRIPT_DIR/../vllm/v1/executor/run_mp_rpc_worker.py" \
       --rank $MPC_RANK \
       --local-rank $MPC_INNER_RANK \
-      --executor-ip ${ExecutorIP} | tee logs/vllm_worker_log_rank${RANK}.txt
+      --executor-ip ${ExecutorIP} 2>&1 | tee logs/vllm_worker_log_rank${RANK}.txt
 )
 
 # sleep 20
