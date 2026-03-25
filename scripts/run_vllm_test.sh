@@ -1,7 +1,9 @@
 #!/bin/bash
 # VLLM 自动化测试脚本
-# 用法: ./scripts/run_vllm_test.sh <preset_name>
+# 用法: ./scripts/run_vllm_test.sh <preset_name> [options]
 # 示例: ./scripts/run_vllm_test.sh qwen30b_a3b_dp2_tp2_ep_head_and_headless_mpi_eager
+# 选项:
+#   --no-test    只启动服务，不运行测试
 
 set -e
 
@@ -31,18 +33,39 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# 检查参数
-if [ $# -eq 0 ]; then
+# 解析参数
+RUN_TEST=true
+PRESET_NAME=""
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --no-test)
+            RUN_TEST=false
+            shift
+            ;;
+        *)
+            if [ -z "$PRESET_NAME" ]; then
+                PRESET_NAME="$1"
+            else
+                log_error "未知参数: $1"
+                echo "用法: $0 <preset_name> [--no-test]"
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+# 检查预设名称参数
+if [ -z "$PRESET_NAME" ]; then
     log_error "缺少预设名称参数"
     echo ""
-    echo "用法: $0 <preset_name>"
+    echo "用法: $0 <preset_name> [--no-test]"
     echo ""
     echo "示例:"
     echo "  $0 qwen30b_a3b_dp2_tp2_ep_head_and_headless_mpi_eager"
     exit 1
 fi
-
-PRESET_NAME="$1"
 PRESET_FILE="$SCRIPT_DIR/presets/${PRESET_NAME}.sh"
 
 # 检查预设文件是否存在
@@ -86,28 +109,31 @@ cleanup() {
             if kill -0 "$pid" 2>/dev/null; then
                 log_info "杀掉进程 $pid"
                 # 尝试 kill 进程组（负 PID），以便同时清理子进程
-                kill -- -"$pid" 2>/dev/null || true
-                # 如果进程组 kill 失败，直接 kill 进程
-                kill "$pid" 2>/dev/null || true
+                kill -- -"$pid"
+                sleep 10
             fi
         done < "$PIDS_FILE"
         rm -f "$PIDS_FILE"
     fi
+
+    log_info "尝试清理其他残留进程..."
 
     # 额外清理可能残留的 vllm 进程，输出到 MPI 清理日志
     {
         # 首先尝试优雅地终止进程
         log_info "尝试优雅终止 vllm 相关进程..."
         pkill -TERM -f "vllm serve" 2>&1 || true
+        pkill -TERM -f "VLLM" 2>&1 || true
         pkill -TERM -f "run_mp_rpc_worker.py" 2>&1 || true
         pkill -TERM -f "serve_mp_rpc_all_mpi_template.sh" 2>&1 || true
 
         # 等待几秒让进程清理
-        sleep 2
+        sleep 8
 
         # 强制清理仍然存活的进程
         log_info "强制清理残留进程..."
         pkill -9 -f "vllm serve" 2>&1 || true
+        pkill -9 -f "VLLM" 2>&1 || true
         pkill -9 -f "run_mp_rpc_worker.py" 2>&1 || true
         pkill -9 -f "serve_mp_rpc_all_mpi_template.sh" 2>&1 || true
 
@@ -118,7 +144,7 @@ cleanup() {
 
     # 等待 MPI 清理完成，将其错误输出保存到日志文件
     {
-        wait 2>&1 || true
+        wait
     } >> "$MPI_CLEANUP_LOG" 2>&1
 
     # 检查是否有 MPI 清理消息
@@ -174,7 +200,7 @@ rm -f "$HEAD_LOG"
 log_info "[3/7] 启动 Head Server..."
 cd "$PROJECT_ROOT"
 
-bash "$SCRIPT_DIR/serve_head_only_template.sh" > "$HEAD_LOG" 2>&1 &
+setsid bash "$SCRIPT_DIR/serve_head_only_template.sh" > "$HEAD_LOG" 2>&1 &
 HEAD_PID=$!
 echo "$HEAD_PID" >> "$PIDS_FILE"
 
@@ -201,8 +227,8 @@ log_info "启动日志: $MPI_WORKERS_LOG"
 # ========================================
 log_info "[5/7] 等待服务启动..."
 
-# 最大等待时间（秒）
-MAX_WAIT=300
+# 最大等待时间（秒）；可通过 VLLM_TEST_MAX_WAIT 覆盖（大模型在 x86 上需要更长时间）
+MAX_WAIT=${VLLM_TEST_MAX_WAIT:-300}
 WAIT_TIME=0
 CHECK_INTERVAL=5
 
@@ -241,58 +267,67 @@ log_info "等待服务完全就绪..."
 sleep 5
 
 # ========================================
-# 步骤 6: 运行测试
+# 步骤 6: 运行测试（可选）
 # ========================================
-log_info "[6/7] 运行测试..."
-echo ""
+if [ "$RUN_TEST" = true ]; then
+    log_info "[6/7] 运行测试..."
+    echo ""
 
-# 运行测试并记录日志
-TEST_OUTPUT=$(bash "$SCRIPT_DIR/serve_test_template.sh" 2>&1)
-TEST_EXIT_CODE=$?
+    # 运行测试并记录日志
+    TEST_OUTPUT=$(bash "$SCRIPT_DIR/serve_test_template.sh" 2>&1)
+    TEST_EXIT_CODE=$?
 
-echo "$TEST_OUTPUT" | tee "$TEST_LOG"
+    echo "$TEST_OUTPUT" | tee "$TEST_LOG"
 
-echo ""
-if [ $TEST_EXIT_CODE -eq 0 ]; then
-    log_success "测试完成！"
-    log_info "测试日志: $TEST_LOG"
-else
-    log_warning "测试退出码: $TEST_EXIT_CODE"
-fi
-
-# ========================================
-# 步骤 6.5: 提取并显示模型回答
-# ========================================
-echo ""
-log_info "========================================"
-log_info "  模型回答 (Content)"
-log_info "========================================"
-
-# 尝试使用 jq 提取 content，如果失败则使用 grep+sed
-if command -v jq &> /dev/null; then
-    # 使用 jq 提取 content
-    CONTENT=$(echo "$TEST_OUTPUT" | jq -r '.choices[0].message.content // .choices[0].text // empty' 2>/dev/null)
-    if [ -n "$CONTENT" ]; then
-        echo -e "${GREEN}$CONTENT${NC}"
+    echo ""
+    if [ $TEST_EXIT_CODE -eq 0 ]; then
+        log_success "测试完成！"
+        log_info "测试日志: $TEST_LOG"
     else
-        log_warning "无法使用 jq 提取 content，尝试备用方法..."
+        log_warning "测试退出码: $TEST_EXIT_CODE"
+    fi
+
+    # ========================================
+    # 步骤 6.5: 提取并显示模型回答
+    # ========================================
+    echo ""
+    log_info "========================================"
+    log_info "  模型回答 (Content)"
+    log_info "========================================"
+
+    # 尝试使用 jq 提取 content，如果失败则使用 grep+sed
+    if command -v jq &> /dev/null; then
+        # 使用 jq 提取 content
+        CONTENT=$(echo "$TEST_OUTPUT" | jq -r '.choices[0].message.content // .choices[0].text // empty' 2>/dev/null)
+        if [ -n "$CONTENT" ]; then
+            echo -e "${GREEN}$CONTENT${NC}"
+        else
+            log_warning "无法使用 jq 提取 content，尝试备用方法..."
+            CONTENT=$(echo "$TEST_OUTPUT" | grep -oP '"content":\s*"\K[^"]*' | head -1)
+            [ -n "$CONTENT" ] && echo -e "${GREEN}$CONTENT${NC}" || log_warning "未能提取到 content 字段"
+        fi
+    else
+        # 备用方法：使用 grep + sed 提取 content
         CONTENT=$(echo "$TEST_OUTPUT" | grep -oP '"content":\s*"\K[^"]*' | head -1)
-        [ -n "$CONTENT" ] && echo -e "${GREEN}$CONTENT${NC}" || log_warning "未能提取到 content 字段"
+        if [ -n "$CONTENT" ]; then
+            echo -e "${GREEN}$CONTENT${NC}"
+        else
+            # 尝试匹配 multiline content (处理包含转义字符的情况)
+            CONTENT=$(echo "$TEST_OUTPUT" | sed -n 's/.*"content"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+            [ -n "$CONTENT" ] && echo -e "${GREEN}$CONTENT${NC}" || log_warning "未能提取到 content 字段"
+        fi
     fi
-else
-    # 备用方法：使用 grep + sed 提取 content
-    CONTENT=$(echo "$TEST_OUTPUT" | grep -oP '"content":\s*"\K[^"]*' | head -1)
-    if [ -n "$CONTENT" ]; then
-        echo -e "${GREEN}$CONTENT${NC}"
-    else
-        # 尝试匹配 multiline content (处理包含转义字符的情况)
-        CONTENT=$(echo "$TEST_OUTPUT" | sed -n 's/.*"content"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
-        [ -n "$CONTENT" ] && echo -e "${GREEN}$CONTENT${NC}" || log_warning "未能提取到 content 字段"
-    fi
-fi
 
-echo ""
-log_info "完整响应请查看: $TEST_LOG"
+    echo ""
+    log_info "完整响应请查看: $TEST_LOG"
+else
+    log_info "[6/7] 跳过测试（--no-test 模式）"
+    log_info "服务已启动并就绪，您可以手动测试"
+    log_info "测试命令示例:"
+    log_info "  curl http://localhost:\${USER_VLLM_PORT}/v1/chat/completions \\"
+    log_info "    -H \"Content-Type: application/json\" \\"
+    log_info "    -d '{\"model\": \"\${USER_VLLM_MODEL}\", \"messages\": [{\"role\": \"user\", \"content\": \"Hello\"}], \"max_tokens\": 16}'"
+fi
 
 # ========================================
 # 步骤 7: 显示日志摘要
@@ -302,7 +337,9 @@ log_info "========================================="
 log_info "  日志文件位置"
 log_info "========================================="
 log_info "Head Server:      $HEAD_LOG"
-log_info "Test Result:      $TEST_LOG"
+if [ "$RUN_TEST" = true ]; then
+    log_info "Test Result:      $TEST_LOG"
+fi
 log_info "MPI Workers:      $MPI_WORKERS_LOG"
 log_info "MPI Cleanup:      $MPI_CLEANUP_LOG"
 
@@ -319,5 +356,21 @@ fi
 
 echo ""
 log_info "========================================="
-log_info "  测试完成"
+if [ "$RUN_TEST" = true ]; then
+    log_info "  测试完成"
+else
+    log_info "  服务已启动（按 Ctrl+C 退出）"
+    log_info "  注意：脚本退出时会自动清理所有进程"
+fi
 log_info "========================================="
+
+# 如果是 --no-test 模式，保持脚本运行以便用户可以手动测试
+if [ "$RUN_TEST" = false ]; then
+    echo ""
+    log_info "服务正在运行中... 按 Ctrl+C 停止"
+    log_info "提示：在另一个终端中可以查看日志："
+    log_info "  tail -f $HEAD_LOG"
+
+    # 等待用户中断
+    wait
+fi
