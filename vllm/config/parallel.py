@@ -82,6 +82,26 @@ class EPLBConfig:
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
 
+    statistics_only: bool = False
+    """
+    When enabled, EPLB will only collect statistics without performing
+    expert weight rearrangement. Useful for analyzing expert load distribution
+    patterns without affecting model performance.
+    """
+
+    statistics_detailed: bool = False
+    """
+    When enabled together with ``log_balancedness`` and ``statistics_only``,
+    print the full per-layer per-expert load table every
+    ``log_balancedness_interval`` steps in addition to the summary line.
+
+    When disabled (default), the per-layer table is suppressed during normal
+    steps to avoid log spam, but is always emitted when the profiler stops
+    (via the ``WorkerProfiler`` stop-callback registered in the worker).
+
+    CLI: ``--eplb-config.statistics_detailed true``
+    """
+
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
         if self.use_async and self.policy != "default":

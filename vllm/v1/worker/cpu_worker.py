@@ -59,6 +59,17 @@ class CPUWorker(Worker):
                 activities=["CPU"],
             )
 
+            # When profiling ends, automatically dump EPLB window statistics.
+            # The lambda is lazy: model_runner and eplb_state are resolved at
+            # call time (after init_device / load_model have run).
+            def _eplb_on_profiler_stop() -> None:
+                eplb = getattr(getattr(self, "model_runner", None), "eplb_state", None)
+                if eplb is not None:
+                    logger.info("Profiler stopped — dumping EPLB window statistics.")
+                    eplb.log_all_statistics()
+
+            self.profiler.add_stop_callback(_eplb_on_profiler_stop)
+
     def init_device(self):
         # Setup OpenMP threads affinity.
         omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND

@@ -2,8 +2,10 @@
 # VLLM 自动化测试脚本
 # 用法: ./scripts/run_vllm_test.sh <preset_name> [options]
 # 示例: ./scripts/run_vllm_test.sh qwen30b_a3b_dp2_tp2_ep_head_and_headless_mpi_eager
+# 默认：启动服务后，调用 serve_test_template.sh 测试
 # 选项:
 #   --no-test    只启动服务，不运行测试
+#   --bench      启动服务后，调用 serve_test_bench_template.sh 测试
 
 set -e
 
@@ -34,13 +36,18 @@ log_error() {
 }
 
 # 解析参数
-RUN_TEST=true
+# TEST_MODE: "test" (默认) | "bench" (--bench) | "none" (--no-test)
+TEST_MODE="test"
 PRESET_NAME=""
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --no-test)
-            RUN_TEST=false
+            TEST_MODE="none"
+            shift
+            ;;
+        --bench)
+            TEST_MODE="bench"
             shift
             ;;
         *)
@@ -48,7 +55,7 @@ while [[ $# -gt 0 ]]; do
                 PRESET_NAME="$1"
             else
                 log_error "未知参数: $1"
-                echo "用法: $0 <preset_name> [--no-test]"
+                echo "用法: $0 <preset_name> [--no-test|--bench]"
                 exit 1
             fi
             shift
@@ -79,6 +86,7 @@ mkdir -p "$PROJECT_ROOT/logs"
 
 # 测试日志文件
 TEST_LOG="$PROJECT_ROOT/logs/test_$(date +%Y%m%d_%H%M%S).log"
+BENCH_LOG="$PROJECT_ROOT/logs/bench_$(date +%Y%m%d_%H%M%S).log"
 HEAD_LOG="$PROJECT_ROOT/logs/vllm_head_log.txt"
 
 # 存储进程 PID
@@ -267,9 +275,9 @@ log_info "等待服务完全就绪..."
 sleep 5
 
 # ========================================
-# 步骤 6: 运行测试（可选）
+# 步骤 6: 运行测试/Bench（可选）
 # ========================================
-if [ "$RUN_TEST" = true ]; then
+if [ "$TEST_MODE" = "test" ]; then
     log_info "[6/7] 运行测试..."
     echo ""
 
@@ -320,6 +328,22 @@ if [ "$RUN_TEST" = true ]; then
 
     echo ""
     log_info "完整响应请查看: $TEST_LOG"
+
+elif [ "$TEST_MODE" = "bench" ]; then
+    log_info "[6/7] 运行 Bench（serve_test_bench_template.sh）..."
+    echo ""
+
+    bash "$SCRIPT_DIR/serve_test_bench_template.sh" > "$BENCH_LOG" 2>&1
+    BENCH_EXIT_CODE=$?
+
+    echo ""
+    if [ $BENCH_EXIT_CODE -eq 0 ]; then
+        log_success "Bench 完成！"
+    else
+        log_warning "Bench 退出码: $BENCH_EXIT_CODE"
+    fi
+    log_info "Bench 日志: $BENCH_LOG"
+
 else
     log_info "[6/7] 跳过测试（--no-test 模式）"
     log_info "服务已启动并就绪，您可以手动测试"
@@ -337,8 +361,10 @@ log_info "========================================="
 log_info "  日志文件位置"
 log_info "========================================="
 log_info "Head Server:      $HEAD_LOG"
-if [ "$RUN_TEST" = true ]; then
+if [ "$TEST_MODE" = "test" ]; then
     log_info "Test Result:      $TEST_LOG"
+elif [ "$TEST_MODE" = "bench" ]; then
+    log_info "Bench Result:     $BENCH_LOG"
 fi
 log_info "MPI Workers:      $MPI_WORKERS_LOG"
 log_info "MPI Cleanup:      $MPI_CLEANUP_LOG"
@@ -356,16 +382,16 @@ fi
 
 echo ""
 log_info "========================================="
-if [ "$RUN_TEST" = true ]; then
-    log_info "  测试完成"
-else
+if [ "$TEST_MODE" = "none" ]; then
     log_info "  服务已启动（按 Ctrl+C 退出）"
     log_info "  注意：脚本退出时会自动清理所有进程"
+else
+    log_info "  测试完成"
 fi
 log_info "========================================="
 
 # 如果是 --no-test 模式，保持脚本运行以便用户可以手动测试
-if [ "$RUN_TEST" = false ]; then
+if [ "$TEST_MODE" = "none" ]; then
     echo ""
     log_info "服务正在运行中... 按 Ctrl+C 停止"
     log_info "提示：在另一个终端中可以查看日志："

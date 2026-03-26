@@ -151,7 +151,9 @@ Configure EPLB with the `--eplb-config` argument, which accepts a JSON string. T
 |-----------|-------------|---------|
 | `window_size`| Number of engine steps to track for rebalancing decisions | 1000 |
 | `step_interval`| Frequency of rebalancing (every N engine steps) | 3000 |
-| `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) | `false` |
+| `log_balancedness` | Log balancedness metrics (avg tokens per expert ÷ max tokens per expert) per step | `false` |
+| `log_balancedness_interval` | Log balancedness every N engine steps (requires `log_balancedness=true`) | `1` |
+| `statistics_only` | Collect expert load statistics **without** performing weight rearrangement. When combined with `log_balancedness=true`, also logs a per-layer per-expert load table every `log_balancedness_interval` steps. Available via CLI as `--eplb-config.statistics_only true` | `false` |
 | `num_redundant_experts` | Additional global experts per EP rank beyond equal distribution | `0` |
 | `use_async` | Use non-blocking EPLB for reduced latency overhead | `false` |
 | `policy` | The policy type for expert parallel load balancing | `"default"` |

@@ -643,6 +643,17 @@ class EplbState:
                         - self.expert_rearrangement_step,
                     )
 
+                # Enhanced statistics for statistics_only mode.
+                # Full per-layer table only when statistics_detailed=True;
+                # when False, the table is suppressed here but always emitted
+                # on profiler stop via log_all_statistics().
+                if (
+                    self.parallel_config.eplb_config.statistics_only
+                    and self.parallel_config.eplb_config.statistics_detailed
+                    and ep_group.rank() == 0
+                ):
+                    self._log_detailed_expert_statistics(eplb_model_state)
+
         # Update the expert load sliding window
         if not is_dummy:
             for eplb_model_state in self.model_states.values():
@@ -703,8 +714,20 @@ class EplbState:
             ):
                 # Still performing asynchronous rearrangement
                 return
-            self.expert_rearrangement_step = 0
-            self.rearrange()
+            # In statistics_only mode, skip weight rearrangement
+            if not self.parallel_config.eplb_config.statistics_only:
+                self.expert_rearrangement_step = 0
+                self.rearrange()
+            else:
+                # Log that we're in statistics_only mode and skipping rearrangement
+                ep_group = get_ep_group().device_group
+                if ep_group.rank() == 0:
+                    logger.info(
+                        "EPLB Statistics-Only Mode: Skipping rearrangement "
+                        "at step %d. Continuing to collect statistics.",
+                        self.expert_rearrangement_step,
+                    )
+                self.expert_rearrangement_step = 0
 
     def rearrange(
         self,
@@ -1186,6 +1209,202 @@ class EplbState:
         for eplb_model_state in self.model_states.values():
             load_pass_list.append(eplb_model_state.expert_load_pass.clone())
         return self._allreduce_list(load_pass_list)
+
+    def log_all_statistics(self) -> None:
+        """On-demand statistics dump for all models (e.g. triggered on profiler stop).
+
+        Only logs on EP group rank 0 to avoid duplicate output.
+        """
+        ep_group = get_ep_group().device_group
+        if ep_group.rank() != 0:
+            return
+        for eplb_model_state in self.model_states.values():
+            self._log_detailed_expert_statistics(eplb_model_state)
+
+    def _log_detailed_expert_statistics(
+        self,
+        eplb_model_state: EplbModelState,
+    ) -> None:
+        """
+        Log detailed per-layer, per-expert statistics for the current window.
+
+        EPLB operates independently per MoE layer (each layer has its own
+        physical_to_logical mapping), so statistics are reported per layer.
+
+        Args:
+            eplb_model_state: The EPLB model state
+            expert_load_pass: Synced expert load for the current step
+                              (num_moe_layers, num_physical_experts)
+        """
+        # expert_load_window: (window_size, num_moe_layers, num_physical_experts)
+        window_data = eplb_model_state.expert_load_window
+        num_moe_layers = eplb_model_state.model.num_moe_layers
+        num_physical_experts = eplb_model_state.model.num_physical_experts
+        physical_to_logical_map = eplb_model_state.physical_to_logical_map
+        # window totals per physical expert per layer:
+        # (num_moe_layers, num_physical_experts)
+        layer_expert_total = window_data.sum(dim=0).long()
+
+        logger.info("=" * 80)
+        logger.info("[EPLB Statistics] Per-Layer Expert Load Analysis")
+        logger.info(
+            "  Model: %s  |  Layers: %d  |  PhysExperts/layer: %d  "
+            "|  WindowSize: %d  |  WindowStep: %d",
+            eplb_model_state.model_name,
+            num_moe_layers,
+            num_physical_experts,
+            self.expert_load_window_size,
+            self.expert_load_window_step,
+        )
+        logger.info("-" * 80)
+
+        def _expert_replicas(p2l: torch.Tensor, n_phys: int) -> dict[int, int]:
+            """Count physical replicas per logical expert for one layer."""
+            reps: dict[int, int] = {}
+            for phys_idx in range(n_phys):
+                log_idx = p2l[phys_idx].item()
+                reps[log_idx] = reps.get(log_idx, 0) + 1
+            return reps
+
+        def _fmt(eid: int, tok: int, rep: int) -> str:
+            return f"E{eid:3}({tok:4}/{rep}r)"
+
+        def _get_expert(
+            sorted_list: list[tuple[int, int]],
+            idx: int,
+            reps: dict[int, int],
+        ) -> str:
+            """Safely retrieve formatted expert entry; returns '-' if out of bounds."""
+            if 0 <= idx < len(sorted_list):
+                eid, tok = sorted_list[idx]
+                return _fmt(eid, tok, reps[eid])
+            return "-"
+
+        # ── Per-layer summary ──────────────────────────────────────────────
+        # One wide line per MoE layer: Top1/2/3, Mid+1/Mid/Mid-1, Bot3/2/1.
+        # Median index: n//2 (lower-middle for even n, exact middle for odd n).
+        _COL = 20  # width per expert column
+        _EXPERT_HDRS = [
+            "Top1(tok/rep)",
+            "Top2(tok/rep)",
+            "Top3(tok/rep)",
+            "Mid+1(tok/rep)",
+            "Mid(tok/rep)",
+            "Mid-1(tok/rep)",
+            "Bot3(tok/rep)",
+            "Bot2(tok/rep)",
+            "Bot1(tok/rep)",
+        ]
+        _prefix = f"  {'Layer':<5}  {'Total':<10}  {'Balance':<12}  "
+        _hdr = _prefix + "  ".join(f"{h:<{_COL}}" for h in _EXPERT_HDRS)
+        logger.info("%s", _hdr)
+        logger.info("%s", "  " + "-" * (len(_hdr) - 2))
+
+        all_layer_balancedness: list[float] = []
+        for layer_idx in range(num_moe_layers):
+            # (num_physical_experts,) window-summed load for this layer
+            phys_totals = layer_expert_total[layer_idx]
+            p2l = physical_to_logical_map[layer_idx]  # (num_physical_experts,)
+
+            # Aggregate physical → logical (tokens and replica counts)
+            log_totals: dict[int, int] = {}
+            log_reps = _expert_replicas(p2l, num_physical_experts)
+            for phys_idx in range(num_physical_experts):
+                log_idx = p2l[phys_idx].item()
+                log_totals[log_idx] = (
+                    log_totals.get(log_idx, 0) + phys_totals[phys_idx].item()
+                )
+
+            if not log_totals:
+                continue
+            layer_total = sum(log_totals.values())
+            num_logical = len(log_totals)
+            avg = layer_total / num_logical if num_logical > 0 else 0.0
+            max_val = max(log_totals.values())
+            balance = avg / max_val if max_val > 0 else 0.0
+            all_layer_balancedness.append(balance)
+
+            se = sorted(log_totals.items(), key=lambda x: x[1], reverse=True)
+            mid = num_logical // 2  # lower-middle for even n, exact middle for odd n
+
+            cols = "  ".join(
+                f"{c:<{_COL}}"
+                for c in [
+                    _get_expert(se, 0, log_reps),  # Top1
+                    _get_expert(se, 1, log_reps),  # Top2
+                    _get_expert(se, 2, log_reps),  # Top3
+                    _get_expert(se, mid - 1, log_reps),  # Mid+1
+                    _get_expert(se, mid, log_reps),  # Mid
+                    _get_expert(se, mid + 1, log_reps),  # Mid-1
+                    _get_expert(se, num_logical - 3, log_reps),  # Bot3
+                    _get_expert(se, num_logical - 2, log_reps),  # Bot2
+                    _get_expert(se, num_logical - 1, log_reps),  # Bot1
+                ]
+            )
+
+            logger.info(
+                "  %-5d  %-10d  %-12.4f  %s",
+                layer_idx,
+                layer_total,
+                balance,
+                cols,
+            )
+
+        # ── Cross-layer aggregate summary ─────────────────────────────────
+        logger.info("-" * 80)
+        all_totals = layer_expert_total.sum(dim=0).long()  # (num_physical_experts,)
+        # Use layer-0 mapping for aggregate (all layers share the same initial map
+        # since statistics_only skips rearrangement)
+        p2l_agg = physical_to_logical_map[0]
+        log_reps_agg = _expert_replicas(p2l_agg, num_physical_experts)
+        log_totals_agg: dict[int, int] = {}
+        for phys_idx in range(num_physical_experts):
+            log_idx = p2l_agg[phys_idx].item()
+            log_totals_agg[log_idx] = (
+                log_totals_agg.get(log_idx, 0) + all_totals[phys_idx].item()
+            )
+
+        grand_total = sum(log_totals_agg.values())
+        n_log = len(log_totals_agg)
+        avg_agg = grand_total / n_log if n_log > 0 else 0.0
+        max_agg = max(log_totals_agg.values()) if log_totals_agg else 0
+        balance_agg = avg_agg / max_agg if max_agg > 0 else 0.0
+        avg_layer_balance = (
+            sum(all_layer_balancedness) / len(all_layer_balancedness)
+            if all_layer_balancedness
+            else 0.0
+        )
+
+        logger.info("Aggregate across all layers (window sum):")
+        logger.info(
+            "  Total=%d  Avg/Expert=%.2f  Max/Expert=%d  "
+            "Balancedness(avg/max)=%.4f  AvgLayerBalance=%.4f",
+            grand_total,
+            avg_agg,
+            max_agg,
+            balance_agg,
+            avg_layer_balance,
+        )
+
+        sorted_agg = sorted(log_totals_agg.items(), key=lambda x: x[1], reverse=True)
+        n_agg = len(sorted_agg)
+        mid_agg = n_agg // 2  # lower-middle for even n
+
+        def _agg_experts(indices: list[int]) -> str:
+            parts = []
+            for idx in indices:
+                if 0 <= idx < n_agg:
+                    eid, tok = sorted_agg[idx]
+                    parts.append(_fmt(eid, tok, log_reps_agg[eid]))
+            return "  ".join(parts)
+
+        top5 = _agg_experts(list(range(min(5, n_agg))))
+        mid5 = _agg_experts(list(range(max(0, mid_agg - 2), min(n_agg, mid_agg + 3))))
+        bot5 = _agg_experts(list(range(max(0, n_agg - 5), n_agg)))
+        logger.info("  Top-5:    %s", top5)
+        logger.info("  Median-5: %s", mid5)
+        logger.info("  Bot-5:    %s", bot5)
+        logger.info("=" * 80)
 
 
 def _node_count_with_rank_mapping(
