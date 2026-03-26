@@ -39,11 +39,15 @@ _VLLM_OPTIONAL_ARGS+=" --eplb-config.rebalance_after_profiler_stop true"
 
 export VLLM_OPTIONAL_ARGS="${_VLLM_OPTIONAL_ARGS}"
 
+# Use mpi4py for EPLB weight-exchange P2P (requires VLLM_CPU_USE_MPI=1, already set above)
+export VLLM_EPLB_COMM_BACKEND="mpi"
+
 echo "========================================="
 echo "  Preset: qwen30b_a3b_dp2_tp2_ep_eplb_rebalance"
 echo "  DP=${USER_VLLM_DATA_PARALLEL_SIZE}, TP=${USER_VLLM_TP_SIZE}, PP=${USER_VLLM_PP_SIZE}"
 echo "  EPLB Mode: REAL (weight rearrangement enabled)"
 echo "  - step_interval=100000 (no auto-trigger during bench)"
-echo "  - rebalance_after_statistics=true (rebalance after profiler stops)"
+echo "  - rebalance_after_profiler_stop=true (rebalance after profiler stops)"
 echo "  - num_redundant_experts=32"
+echo "  - VLLM_EPLB_COMM_BACKEND=mpi"
 echo "========================================="

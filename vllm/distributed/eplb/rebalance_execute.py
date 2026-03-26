@@ -20,9 +20,54 @@ from torch.distributed import (
     get_global_rank,
 )
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# MPI P2P helpers for EPLB weight exchange
+# ---------------------------------------------------------------------------
+
+# TAG bit layout (32-bit):
+#   [31:24] category  — 0x01 = EPLB_REBALANCE
+#   [23:16] round_id  — lower 8 bits of rearrangement step counter
+#   [15:8]  layer_idx — lower 8 bits of MoE layer index
+#   [7:0]   tensor_idx — per-expert-tensor index within the layer
+_MPI_TAG_CATEGORY_EPLB_REBALANCE: int = 0x01
+
+
+def _make_eplb_tag(round_id: int, layer_idx: int, tensor_idx: int) -> int:
+    return (
+        (_MPI_TAG_CATEGORY_EPLB_REBALANCE & 0xFF) << 24
+        | (round_id & 0xFF) << 16
+        | (layer_idx & 0xFF) << 8
+        | (tensor_idx & 0xFF)
+    )
+
+
+def _mpi_batch_p2p(
+    sends: list[tuple[int, torch.Tensor]],
+    recvs: list[tuple[int, torch.Tensor]],
+    round_id: int,
+    layer_idx: int,
+    tensor_idx: int,
+) -> None:
+    """Exchange tensors with peer ranks using mpi4py non-blocking P2P."""
+    from mpi4py import MPI  # type: ignore[import]
+
+    comm = MPI.COMM_WORLD
+    tag = _make_eplb_tag(round_id, layer_idx, tensor_idx)
+    reqs = []
+    for src_rank, buf in recvs:
+        assert buf.is_contiguous(), "MPI recv buffer must be contiguous"
+        assert buf.numel() < 2**31, f"MPI recv buffer too large: {buf.numel()}"
+        reqs.append(comm.Irecv(buf, source=src_rank, tag=tag))
+    for dst_rank, buf in sends:
+        assert buf.is_contiguous(), "MPI send buffer must be contiguous"
+        assert buf.numel() < 2**31, f"MPI send buffer too large: {buf.numel()}"
+        reqs.append(comm.Isend(buf, dest=dst_rank, tag=tag))
+    MPI.Request.Waitall(reqs)
 
 
 @dataclass
@@ -158,6 +203,8 @@ def move_to_buffer(
     expert_weights_buffers: Sequence[torch.Tensor],
     cuda_stream: Any,
     ep_group: ProcessGroup,
+    round_id: int = 0,
+    layer_idx: int = 0,
 ) -> MoveToBufferResult:
     """
     Rearranges expert weights during EPLB rebalancing.
@@ -249,13 +296,12 @@ def move_to_buffer(
                 for w, b in zip(expert_weights, expert_weights_buffers):
                     b[dst].copy_(w[src_local], non_blocking=True)
 
-    p2p_ops: list[P2POp] = []
-
     # Pre-compute global ranks mapping
     ep_size = ep_group.size()
     rank_to_global = {rank: get_global_rank(ep_group, rank) for rank in range(ep_size)}
 
-    # 2. Post sends
+    # 2. Collect sends: (dst_global_rank, weight_tensor) per expert per weight tensor.
+    p2p_sends: list[tuple[int, torch.Tensor]] = []
     if send_count > 0:
         experts = send_expert_ids[:send_count]
         srcs = send_src_rows[:send_count]
@@ -286,16 +332,11 @@ def move_to_buffer(
                 recv_ranks.append(ranks_to_recv[recver_pos])
             for dst in recv_ranks:
                 dst_global = rank_to_global[dst]
-                p2p_ops += [
-                    P2POp(
-                        torch.distributed.isend,
-                        w[src],
-                        dst_global,
-                    )
-                    for w in expert_weights
-                ]
+                for w in expert_weights:
+                    p2p_sends.append((dst_global, w[src]))
 
-    # 3. Post recvs
+    # 3. Collect recvs: (src_global_rank, buffer_tensor) per expert per buffer tensor.
+    p2p_recvs: list[tuple[int, torch.Tensor]] = []
     if recv_count > 0:
         experts = recv_expert_ids[:recv_count]
         dsts = recv_dst_rows[:recv_count]
@@ -323,25 +364,26 @@ def move_to_buffer(
             else:
                 src = ranks_to_send[recver_pos - remainder_start]
             src_global = rank_to_global[src]
-            p2p_ops += [
-                P2POp(
-                    torch.distributed.irecv,
-                    b[dst],
-                    src_global,
-                )
-                for b in expert_weights_buffers
-            ]
+            for b in expert_weights_buffers:
+                p2p_recvs.append((src_global, b[dst]))
 
-    # 4. Execute the P2P operations. The real communication happens here.
-    if p2p_ops and cuda_stream is not None and torch.cuda.is_available():
-        with torch.cuda.stream(cuda_stream):
-            reqs = batch_isend_irecv(p2p_ops)
-            for req in reqs:
-                req.wait()
-    elif p2p_ops:
-        reqs = batch_isend_irecv(p2p_ops)
-        for req in reqs:
-            req.wait()
+    # 4. Execute. Dispatch to mpi4py or torch.distributed based on env config.
+    if p2p_sends or p2p_recvs:
+        if envs.VLLM_EPLB_COMM_BACKEND == "mpi":
+            _mpi_batch_p2p(p2p_sends, p2p_recvs, round_id, layer_idx, tensor_idx=0)
+        else:
+            p2p_ops = [P2POp(torch.distributed.isend, t, r) for r, t in p2p_sends] + [
+                P2POp(torch.distributed.irecv, t, r) for r, t in p2p_recvs
+            ]
+            if cuda_stream is not None and torch.cuda.is_available():
+                with torch.cuda.stream(cuda_stream):
+                    reqs = batch_isend_irecv(p2p_ops)
+                    for req in reqs:
+                        req.wait()
+            else:
+                reqs = batch_isend_irecv(p2p_ops)
+                for req in reqs:
+                    req.wait()
     # wait for the communication to finish
     return (
         is_unchanged,
@@ -504,6 +546,8 @@ async def transfer_layer(
         expert_weights_buffers=expert_weights_buffer,
         cuda_stream=cuda_stream,
         ep_group=ep_group,
+        round_id=0,
+        layer_idx=layer,
     )
     return is_unchanged, is_received_locally, recv_metadata
 
@@ -515,6 +559,7 @@ def rearrange_expert_weights_inplace(
     ep_group: ProcessGroup,
     is_profile: bool = False,
     rank_mapping: dict[int, int] | None = None,
+    round_id: int = 0,
 ) -> None:
     """
     Rearranges the expert weights in place according to the new expert indices.
@@ -534,6 +579,8 @@ def rearrange_expert_weights_inplace(
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
         rank_mapping: A dictionary mapping old rank to new rank.
+        round_id: Monotonically increasing rearrangement counter; used to
+            generate unique MPI message tags when VLLM_EPLB_COMM_BACKEND=mpi.
     """
     if rank_mapping is not None:
         if len(rank_mapping) == ep_group.size():
@@ -597,6 +644,8 @@ def rearrange_expert_weights_inplace(
             expert_weights_buffers=weights_buffer,
             cuda_stream=None,
             ep_group=ep_group,
+            round_id=round_id,
+            layer_idx=layer_idx,
         )
 
         move_from_buffer(

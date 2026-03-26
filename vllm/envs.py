@@ -261,6 +261,7 @@ if TYPE_CHECKING:
     VLLM_USE_XCPU_LINEAR: bool = False
     VLLM_DISABLE_TQDM_AND_MONITOR: bool = False
     VLLM_CPU_MOCK_LINEAR: bool = False
+    VLLM_EPLB_COMM_BACKEND: str = "torch"
 
 
 def get_default_cache_root():
@@ -1645,6 +1646,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_DISABLE_TQDM_AND_MONITOR", "0"))
     ),
     "VLLM_CPU_MOCK_LINEAR": lambda: bool(int(os.getenv("VLLM_CPU_MOCK_LINEAR", "0"))),
+    # EPLB weight-exchange communication backend.
+    # "torch": use torch.distributed P2P (default, works everywhere)
+    # "mpi": use mpi4py P2P (requires VLLM_CPU_USE_MPI=1)
+    "VLLM_EPLB_COMM_BACKEND": lambda: os.getenv("VLLM_EPLB_COMM_BACKEND", "torch"),
 }
 
 # --8<-- [end:env-vars-definition]

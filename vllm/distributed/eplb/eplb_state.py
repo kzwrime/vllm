@@ -907,6 +907,7 @@ class EplbState:
                     ep_group,
                     is_profile,
                     rank_mapping,
+                    round_id=self.expert_rearrangement_step,
                 )
 
                 if not is_profile:
