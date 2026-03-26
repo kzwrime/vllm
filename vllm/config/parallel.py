@@ -102,6 +102,20 @@ class EPLBConfig:
     CLI: ``--eplb-config.statistics_detailed true``
     """
 
+    rebalance_after_profiler_stop: bool = False
+    """
+    When enabled, triggers an immediate expert rearrangement on the next
+    ``step()`` after the profiler stops (via the ``_eplb_on_profiler_stop``
+    callback in the worker).  This lets a second benchmark run benefit from
+    the balanced mapping computed from the first run's window data.
+
+    Compatible with ``statistics_only=True``: statistics-only mode suppresses
+    automatic rearrangement at ``step_interval``, but this flag still allows a
+    single controlled rearrangement when the profiler stops.
+
+    CLI: ``--eplb-config.rebalance_after_profiler_stop true``
+    """
+
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
         if self.use_async and self.policy != "default":

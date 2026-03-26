@@ -14,38 +14,25 @@ fi
 load_env_file "$SCRIPT_DIR/env.sh"
 load_user_config "$SCRIPT_DIR"
 
-# Prefill 测试
-# vllm bench serve --port ${USER_VLLM_PORT} \
-#     --model ${USER_VLLM_MODEL} \
-#     --backend vllm \
-#     --endpoint /v1/completions \
-#     --dataset-name random \
-#     --random-input-len 5500 \
-#     --random-output-len 1 \
-#     --random-range-ratio 0.0 \
-#     --profile \
-#     --num-prompts 1
-
 # Batch Decode 测试
 vllm bench serve --port ${USER_VLLM_PORT} \
     --model ${USER_VLLM_MODEL} \
     --backend vllm \
     --endpoint /v1/completions \
     --dataset-name random \
-    --random-input-len 103 \
+    --random-input-len 30 \
     --random-output-len 30 \
-    --random-range-ratio 0.9 \
+    --random-range-ratio 0.0 \
     --profile \
-    --num-prompts 13
+    --num-prompts 4
 
-# Single Decode 测试
-# vllm bench serve --port ${USER_VLLM_PORT} \
-#     --model ${USER_VLLM_MODEL} \
-#     --backend vllm \
-#     --endpoint /v1/completions \
-#     --dataset-name random \
-#     --random-input-len 103 \
-#     --random-output-len 200 \
-#     --random-range-ratio 0.0 \
-#     --profile \
-#     --num-prompts 1
+vllm bench serve --port ${USER_VLLM_PORT} \
+    --model ${USER_VLLM_MODEL} \
+    --backend vllm \
+    --endpoint /v1/completions \
+    --dataset-name random \
+    --random-input-len 30 \
+    --random-output-len 30 \
+    --random-range-ratio 0.0 \
+    --profile \
+    --num-prompts 4

@@ -296,6 +296,12 @@ class EplbState:
         """
         CUDA device index for the async EPLB worker thread.
         """
+        self._force_rearrange_pending: bool = False
+        """
+        When True, the next call to step() will immediately call rearrange()
+        regardless of the step interval.  Set by log_all_statistics() when
+        rebalance_after_statistics=True in the EPLB config.
+        """
         if self.device.type == "cuda":
             self.cuda_device_index = self.device.index
             if self.cuda_device_index is None and torch.cuda.is_available():
@@ -706,6 +712,20 @@ class EplbState:
                             ep_group.rank(),
                             eplb_model_state.model.num_moe_layers,
                         )
+
+        # Forced rearrangement requested by profiler stop callback.
+        # Executes unconditionally even if statistics_only=True.
+        if self._force_rearrange_pending:
+            self._force_rearrange_pending = False
+            self.expert_rearrangement_step = 0
+            ep_group_fr = get_ep_group().device_group
+            if ep_group_fr.rank() == 0:
+                logger.info(
+                    "EPLB: Executing forced rearrangement after profiler stop "
+                    "(rebalance_after_profiler_stop=True)."
+                )
+            self.rearrange()
+            return
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
             if any(
@@ -1210,14 +1230,34 @@ class EplbState:
             load_pass_list.append(eplb_model_state.expert_load_pass.clone())
         return self._allreduce_list(load_pass_list)
 
-    def log_all_statistics(self) -> None:
+    def log_all_statistics(self, is_profiler_stop: bool = False) -> None:
         """On-demand statistics dump for all models (e.g. triggered on profiler stop).
 
         Only logs on EP group rank 0 to avoid duplicate output.
+
+        Args:
+            is_profiler_stop: If True, this call originates from the profiler
+                stop callback.  When ``rebalance_after_profiler_stop=True`` in
+                the EPLB config, sets ``_force_rearrange_pending`` on **all**
+                ranks so the next ``step()`` call triggers an immediate
+                rearrangement (overriding ``statistics_only`` if set).
         """
+        if (
+            is_profiler_stop
+            and self.parallel_config.eplb_config.rebalance_after_profiler_stop
+        ):
+            self._force_rearrange_pending = True
         ep_group = get_ep_group().device_group
         if ep_group.rank() != 0:
             return
+        if (
+            is_profiler_stop
+            and self.parallel_config.eplb_config.rebalance_after_profiler_stop
+        ):
+            logger.info(
+                "EPLB: rebalance_after_profiler_stop=True — "
+                "rearrangement will be triggered on the next forward pass."
+            )
         for eplb_model_state in self.model_states.values():
             self._log_detailed_expert_statistics(eplb_model_state)
 

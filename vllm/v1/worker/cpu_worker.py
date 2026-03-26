@@ -66,7 +66,7 @@ class CPUWorker(Worker):
                 eplb = getattr(getattr(self, "model_runner", None), "eplb_state", None)
                 if eplb is not None:
                     logger.info("Profiler stopped — dumping EPLB window statistics.")
-                    eplb.log_all_statistics()
+                    eplb.log_all_statistics(is_profiler_stop=True)
 
             self.profiler.add_stop_callback(_eplb_on_profiler_stop)
 

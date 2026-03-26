@@ -2,6 +2,8 @@
 # VLLM 自动化测试脚本
 # 用法: ./scripts/run_vllm_test.sh <preset_name> [options]
 # 示例: ./scripts/run_vllm_test.sh qwen30b_a3b_dp2_tp2_ep_head_and_headless_mpi_eager
+# 示例: ./scripts/run_vllm_test.sh qwen30b_a3b_dp2_tp2_ep_statistics_only
+# 示例: ./scripts/run_vllm_test.sh qwen30b_a3b_dp2_tp2_ep_statistics_only --bench
 # 默认：启动服务后，调用 serve_test_template.sh 测试
 # 选项:
 #   --no-test    只启动服务，不运行测试
