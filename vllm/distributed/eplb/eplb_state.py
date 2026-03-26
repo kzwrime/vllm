@@ -607,8 +607,11 @@ class EplbState:
             == 0
         ):
             # Sync the expert load pass for each model (main and drafter).
+            # _sync_load_pass also synchronises _force_rearrange_pending across
+            # EP ranks by piggybacking a sentinel into the existing allreduce
+            # (zero extra communication cost).
             # expert_load_pass: (num_moe_layers, num_physical_experts)
-            expert_load_pass_list = self._sync_load_pass()
+            expert_load_pass_list, _force_synced = self._sync_load_pass()
             ep_group = get_ep_group().device_group
             for expert_load_pass, eplb_model_state in zip(
                 expert_load_pass_list, self.model_states.values()
@@ -659,6 +662,10 @@ class EplbState:
                     and ep_group.rank() == 0
                 ):
                     self._log_detailed_expert_statistics(eplb_model_state)
+
+            # Propagate the synced force flag so the check below fires.
+            if _force_synced:
+                self._force_rearrange_pending = True
 
         # Update the expert load sliding window
         if not is_dummy:
@@ -715,6 +722,9 @@ class EplbState:
 
         # Forced rearrangement requested by profiler stop callback.
         # Executes unconditionally even if statistics_only=True.
+        # _force_rearrange_pending is synchronised via the load-stats allreduce
+        # in _sync_load_pass() (called every log_balancedness_interval steps),
+        # so no dedicated per-step collective is needed here.
         if self._force_rearrange_pending:
             self._force_rearrange_pending = False
             self.expert_rearrangement_step = 0
@@ -1221,15 +1231,37 @@ class EplbState:
             offset += shape[0]
         return all_reduce_list
 
-    def _sync_load_pass(self) -> list[torch.Tensor]:
+    def _sync_load_pass(self) -> tuple[list[torch.Tensor], bool]:
+        """Sync expert load pass across EP ranks.
+
+        Returns:
+            (synced_load_pass_list, force_rearrange_requested)
+
+        When ``rebalance_after_profiler_stop`` is enabled, the
+        ``_force_rearrange_pending`` flag is piggybacked into the existing
+        allreduce as an extra sentinel row appended to the concatenated tensor.
+        This synchronises the flag across all EP ranks at zero additional
+        communication cost — the allreduce message is only a few bytes larger.
         """
-        Sync the expert load pass across all ranks for log stats.
-        Doesn't update the expert load pass in eplb_model_state.
-        """
-        load_pass_list = []
-        for eplb_model_state in self.model_states.values():
-            load_pass_list.append(eplb_model_state.expert_load_pass.clone())
-        return self._allreduce_list(load_pass_list)
+        load_pass_list = [
+            eplb_model_state.expert_load_pass.clone()
+            for eplb_model_state in self.model_states.values()
+        ]
+
+        if not self.parallel_config.eplb_config.rebalance_after_profiler_stop:
+            return self._allreduce_list(load_pass_list), False
+
+        # Append a sentinel row to carry the force-rearrange vote.
+        # Shape: (1, num_physical_experts); only element [0, 0] is used.
+        ref = load_pass_list[0]
+        sentinel = torch.zeros(1, ref.shape[1], dtype=ref.dtype, device=ref.device)
+        sentinel[0, 0] = float(self._force_rearrange_pending)
+
+        synced_extended = self._allreduce_list(load_pass_list + [sentinel])
+        force_requested = synced_extended[-1][0, 0].item() > 0.5
+        # Clear local flag — all ranks now share the same synced value.
+        self._force_rearrange_pending = False
+        return synced_extended[:-1], force_requested
 
     def log_all_statistics(self, is_profiler_stop: bool = False) -> None:
         """On-demand statistics dump for all models (e.g. triggered on profiler stop).
