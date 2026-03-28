@@ -825,7 +825,9 @@ class WorkerProc:
                                 "Overwriting worker's environment "
                                 "variable '%s'. "
                                 "Existing value: '%s', New value: '%s'",
-                                (k, existing_v, v),
+                                k,
+                                existing_v,
+                                v,
                             )
                         os.environ[k] = v
 
