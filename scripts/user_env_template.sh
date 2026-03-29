@@ -113,6 +113,8 @@ case ${PD_MODE} in
 
     "NOT_MOE")
         ### Dense 模型，不做任何额外设置 ###
+        export USER_VLLM_MAX_NUM_BATCHED_TOKENS=8192
+
         ;;
 
     *)

@@ -243,19 +243,26 @@ WAIT_TIME=0
 CHECK_INTERVAL=5
 
 while [ $WAIT_TIME -lt $MAX_WAIT ]; do
-    if [ -f "$HEAD_LOG" ]; then
-        if grep -q "Application startup complete" "$HEAD_LOG"; then
-            log_success "服务启动成功！"
-            break
-        fi
+    # 检查成功标志
+    if [ -f "$HEAD_LOG" ] && grep -q "Application startup complete" "$HEAD_LOG"; then
+        log_success "服务启动成功！"
+        break
+    fi
 
-        # 检查是否有错误
-        # if grep -q "Error\|Exception\|Traceback" "$HEAD_LOG"; then
-        if grep -q "Error\|Traceback" "$HEAD_LOG"; then
-            log_error "检测到错误，请检查日志: $HEAD_LOG"
-            tail -20 "$HEAD_LOG"
-            exit 1
-        fi
+    ERROR_DETAIL=$(grep -HinE "\berror\b|\btraceback\b|\bexit\b" "$HEAD_LOG" "$MPI_WORKERS_LOG" 2>/dev/null | head -n 5)
+
+    if [ -n "$ERROR_DETAIL" ]; then
+        log_error "！！！检测到异常中断！！！"
+        log_error "触发详情（格式为 文件名:行号:具体内容）:"
+        echo "$ERROR_DETAIL" | while read -r line; do
+            log_error " -> $line"
+        done
+        
+        log_error "--------------------------------------"
+        log_error "最近 10 行日志快照："
+        [ -f "$HEAD_LOG" ] && { echo "--- $HEAD_LOG ---"; tail -10 "$HEAD_LOG"; }
+        [ -f "$MPI_WORKERS_LOG" ] && { echo "--- $MPI_WORKERS_LOG ---"; tail -10 "$MPI_WORKERS_LOG"; }
+        exit 1
     fi
 
     echo -n "."
@@ -302,29 +309,29 @@ if [ "$TEST_MODE" = "test" ]; then
     # ========================================
     echo ""
     log_info "========================================"
-    log_info "  模型回答 (Content)"
+    log_info "  模型回答 (Content/Text)"
     log_info "========================================"
 
-    # 尝试使用 jq 提取 content，如果失败则使用 grep+sed
+    # 尝试使用 jq 提取 content 或 text，如果失败则使用 grep+sed
     if command -v jq &> /dev/null; then
-        # 使用 jq 提取 content
+        # 使用 jq 提取 content 或 text
         CONTENT=$(echo "$TEST_OUTPUT" | jq -r '.choices[0].message.content // .choices[0].text // empty' 2>/dev/null)
         if [ -n "$CONTENT" ]; then
-            echo -e "${GREEN}$CONTENT${NC}"
+            echo -e "[Result] ${GREEN}$CONTENT${NC}"
         else
-            log_warning "无法使用 jq 提取 content，尝试备用方法..."
-            CONTENT=$(echo "$TEST_OUTPUT" | grep -oP '"content":\s*"\K[^"]*' | head -1)
-            [ -n "$CONTENT" ] && echo -e "${GREEN}$CONTENT${NC}" || log_warning "未能提取到 content 字段"
+            log_warning "无法使用 jq 提取 content/text，尝试备用方法..."
+            CONTENT=$(echo "$TEST_OUTPUT" | grep -oP '"(content|text)":\s*"\K[^"]*' | head -1)
+            [ -n "$CONTENT" ] && echo -e "${GREEN}$CONTENT${NC}" || log_warning "未能提取到 content 或 text 字段"
         fi
     else
-        # 备用方法：使用 grep + sed 提取 content
-        CONTENT=$(echo "$TEST_OUTPUT" | grep -oP '"content":\s*"\K[^"]*' | head -1)
+        # 备用方法：使用 grep + sed 提取 content 或 text
+        CONTENT=$(echo "$TEST_OUTPUT" | grep -oP '"(content|text)":\s*"\K[^"]*' | head -1)
         if [ -n "$CONTENT" ]; then
             echo -e "${GREEN}$CONTENT${NC}"
         else
-            # 尝试匹配 multiline content (处理包含转义字符的情况)
-            CONTENT=$(echo "$TEST_OUTPUT" | sed -n 's/.*"content"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
-            [ -n "$CONTENT" ] && echo -e "${GREEN}$CONTENT${NC}" || log_warning "未能提取到 content 字段"
+            # 尝试匹配 multiline content/text (处理包含转义字符的情况)
+            CONTENT=$(echo "$TEST_OUTPUT" | sed -n 's/.*"\(content\|text\)"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\2/p' | head -1)
+            [ -n "$CONTENT" ] && echo -e "${GREEN}$CONTENT${NC}" || log_warning "未能提取到 content 或 text 字段"
         fi
     fi
 
