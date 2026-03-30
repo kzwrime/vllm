@@ -7,14 +7,36 @@ import sys
 from openai import OpenAI
 
 
-def source_env_file(env_file):
-    """读取 shell 环境变量文件并返回环境变量字典"""
+def source_env_with_common_logic(script_dir):
+    """
+    使用与 serve_head_only_template.sh 相同的逻辑加载环境变量
+
+    加载优先级:
+    1. 预设配置 (VLLM_CURRENT_PRESET)
+    2. 用户自定义配置 (user_env.sh)
+    3. 模板文件回退 (user_env_template.sh)
+    """
+    # 构建与 serve_head_only_template.sh 相同的 bash 命令
+    # 需要传递当前进程的环境变量，特别是 VLLM_CURRENT_PRESET
+    bash_command = f"""
+export VLLM_CURRENT_PRESET="${{VLLM_CURRENT_PRESET:-}}"
+source {script_dir}/common.sh
+load_env_file "{script_dir}/env.sh"
+load_user_config "{script_dir}"
+env
+"""
+
     result = subprocess.run(
-        f"bash -c 'source {env_file} && env'",
-        shell=True,
+        ["bash", "-c", bash_command],
         capture_output=True,
         text=True,
+        env=os.environ,  # 传递当前进程的环境变量
     )
+
+    if result.returncode != 0:
+        print("[错误] 加载环境变量失败:")
+        print(result.stderr)
+        sys.exit(1)
 
     env_vars = {}
     for line in result.stdout.splitlines():
@@ -24,15 +46,9 @@ def source_env_file(env_file):
     return env_vars
 
 
-# 1. 读取 user_env.sh 中的环境变量
+# 1. 使用与 serve_head_only_template.sh 相同的逻辑加载环境变量
 script_dir = os.path.dirname(os.path.abspath(__file__))
-env_file = os.path.join(script_dir, "user_env.sh")
-
-if not os.path.exists(env_file):
-    print(f"[错误] 找不到环境变量文件: {env_file}")
-    sys.exit(1)
-
-env_vars = source_env_file(env_file)
+env_vars = source_env_with_common_logic(script_dir)
 
 # 2. 从环境变量中获取配置
 MODEL_NAME = env_vars.get("USER_VLLM_MODEL", "你的模型名称")
@@ -46,7 +62,7 @@ client = OpenAI(
 
 
 def main():
-    print("开始测试流式输出...\\n")
+    print("开始测试流式输出...\n")
     print(f"模型: {MODEL_NAME}")
     print(f"端口: {PORT}")
     print("-" * 50)

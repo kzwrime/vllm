@@ -10,14 +10,36 @@ import time
 from openai import AsyncOpenAI
 
 
-def source_env_file(env_file):
-    """读取 shell 环境变量文件并返回环境变量字典"""
+def source_env_with_common_logic(script_dir):
+    """
+    使用与 serve_head_only_template.sh 相同的逻辑加载环境变量
+
+    加载优先级:
+    1. 预设配置 (VLLM_CURRENT_PRESET)
+    2. 用户自定义配置 (user_env.sh)
+    3. 模板文件回退 (user_env_template.sh)
+    """
+    # 构建与 serve_head_only_template.sh 相同的 bash 命令
+    # 需要传递当前进程的环境变量，特别是 VLLM_CURRENT_PRESET
+    bash_command = f"""
+export VLLM_CURRENT_PRESET="${{VLLM_CURRENT_PRESET:-}}"
+source {script_dir}/common.sh
+load_env_file "{script_dir}/env.sh"
+load_user_config "{script_dir}"
+env
+"""
+
     result = subprocess.run(
-        f"bash -c 'source {env_file} && env'",
-        shell=True,
+        ["bash", "-c", bash_command],
         capture_output=True,
         text=True,
+        env=os.environ,  # 传递当前进程的环境变量
     )
+
+    if result.returncode != 0:
+        print("[错误] 加载环境变量失败:")
+        print(result.stderr)
+        sys.exit(1)
 
     env_vars = {}
     for line in result.stdout.splitlines():
@@ -27,15 +49,9 @@ def source_env_file(env_file):
     return env_vars
 
 
-# 1. 读取 user_env.sh 中的环境变量
+# 1. 使用与 serve_head_only_template.sh 相同的逻辑加载环境变量
 script_dir = os.path.dirname(os.path.abspath(__file__))
-env_file = os.path.join(script_dir, "user_env.sh")
-
-if not os.path.exists(env_file):
-    print(f"[错误] 找不到环境变量文件: {env_file}")
-    sys.exit(1)
-
-env_vars = source_env_file(env_file)
+env_vars = source_env_with_common_logic(script_dir)
 
 # 2. 从环境变量中获取配置
 MODEL_NAME = env_vars.get("USER_VLLM_MODEL", "你的模型名称")
@@ -76,7 +92,7 @@ PROMPTS = [
         "请保持语言风格专业、客观且逻辑严密。"
     ),
 ]
-PROMPTS = PROMPTS[:-1]  # 最后一条过长的测试用例暂时不执行
+PROMPTS = PROMPTS[-1]  # 最后一条过长的测试用例暂时不执行
 
 # 用于记录各个任务的状态，方便在屏幕上更新 tips
 task_states = {}
@@ -142,7 +158,6 @@ async def display_tips():
         # 拼接单行状态栏 (\033[K 用于清除行尾残余字符，防止残留)
         line = (
             f"\r\033[K{spinner} 耗时: {elapsed:.1f}s"
-            and ""
             + f" | 活跃任务: {active_count}/{len(PROMPTS)} | "
             + " | ".join(status_strs)
         )
