@@ -92,7 +92,7 @@ PROMPTS = [
         "请保持语言风格专业、客观且逻辑严密。"
     ),
 ]
-PROMPTS = PROMPTS[-1]  # 最后一条过长的测试用例暂时不执行
+PROMPTS = PROMPTS[:-1]  # 最后一条过长的测试用例暂时不执行
 
 # 用于记录各个任务的状态，方便在屏幕上更新 tips
 task_states = {}
