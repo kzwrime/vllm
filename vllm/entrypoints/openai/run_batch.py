@@ -21,6 +21,7 @@ from pydantic_core.core_schema import ValidationInfo
 from starlette.datastructures import State
 from tqdm import tqdm
 
+from vllm import envs
 from vllm.config import config
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
@@ -303,8 +304,8 @@ class BatchProgressTracker:
             self._pbar.update()
 
     def pbar(self) -> tqdm:
-        enable_tqdm = (
-            not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
+        enable_tqdm = not envs.VLLM_DISABLE_TQDM_AND_MONITOR and (
+            torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
         )
         self._pbar = tqdm(
             total=self._total,
