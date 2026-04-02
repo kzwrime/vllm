@@ -316,8 +316,8 @@ class BatchProgressTracker:
             self._pbar.update()
 
     def pbar(self) -> tqdm:
-        enable_tqdm = (
-            not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
+        enable_tqdm = not envs.VLLM_DISABLE_TQDM_AND_MONITOR and (
+            torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
         )
         self._pbar = tqdm(
             total=self._total,
