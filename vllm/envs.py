@@ -239,6 +239,7 @@ if TYPE_CHECKING:
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
+    VLLM_USE_XCPU_LINEAR: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
@@ -1646,6 +1647,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ELASTIC_EP_DRAIN_REQUESTS": lambda: bool(
         int(os.getenv("VLLM_ELASTIC_EP_DRAIN_REQUESTS", "0"))
     ),
+    "VLLM_USE_XCPU_LINEAR": lambda: bool(int(os.getenv("VLLM_USE_XCPU_LINEAR", "0"))),
     # If set to 1, enable CUDA graph memory estimation during memory profiling.
     # This profiles CUDA graph memory usage to provide more accurate KV cache
     # memory allocation. Disabled by default to preserve existing behavior.
