@@ -5,6 +5,7 @@ import os
 import pickle
 import queue
 import signal
+import socket
 import threading
 import time
 import traceback
@@ -150,44 +151,16 @@ class MultiprocExecutor(Executor):
             )
             scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
         # Create workers
-        context = get_mp_context()
-        shared_worker_lock = context.Lock()
-        unready_workers: list[UnreadyWorkerProcHandle] = []
+        global_start_rank = (
+            self.local_world_size * self.parallel_config.node_rank_within_dp
+        )
         success = False
         try:
-            global_start_rank = (
-                self.local_world_size * self.parallel_config.node_rank_within_dp
-            )
-            # When using fork, keep track of socket file descriptors that are
-            # inherited by the worker, so that we can close them in subsequent
-            # workers
-            inherited_fds: list[int] | None = (
-                [] if context.get_start_method() == "fork" else None
-            )
-
-            for local_rank in range(self.local_world_size):
-                global_rank = global_start_rank + local_rank
-                is_driver_worker = self._is_driver_worker(global_rank)
-                unready_worker_handle = WorkerProc.make_worker_process(
-                    vllm_config=self.vllm_config,
-                    local_rank=local_rank,
-                    rank=global_rank,
-                    distributed_init_method=distributed_init_method,
-                    input_shm_handle=scheduler_output_handle,
-                    shared_worker_lock=shared_worker_lock,
-                    is_driver_worker=is_driver_worker,
-                    inherited_fds=inherited_fds,
-                )
-                unready_workers.append(unready_worker_handle)
-                if inherited_fds is not None:
-                    inherited_fds.append(unready_worker_handle.death_writer.fileno())
-                    inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
-
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
-
-            # Wait for all local workers to be ready.
-            self.workers = WorkerProc.wait_for_ready(unready_workers)
+            self.workers = self._create_workers(
+                global_start_rank, distributed_init_method, scheduler_output_handle
+            )
 
             # Start background thread to monitor worker health if not in headless mode.
             if self.monitor_workers:
@@ -225,15 +198,58 @@ class MultiprocExecutor(Executor):
             success = True
         finally:
             if not success:
-                # Clean up the worker procs if there was a failure.
-                # Close death_writers first to signal workers to exit
+                self.shutdown()
+
+        self.output_rank = self._get_output_rank()
+
+    def _create_workers(
+        self,
+        global_start_rank: int,
+        distributed_init_method: str,
+        scheduler_output_handle: Handle | None,
+    ) -> list["WorkerProcHandle"]:
+        """Create worker processes and wait for them to be ready."""
+        context = get_mp_context()
+        shared_worker_lock = context.Lock()
+        unready_workers: list[UnreadyWorkerProcHandle] = []
+        success = False
+        try:
+            # When using fork, keep track of socket file descriptors that are
+            # inherited by the worker, so that we can close them in subsequent
+            # workers
+            inherited_fds: list[int] | None = (
+                [] if context.get_start_method() == "fork" else None
+            )
+            for local_rank in range(self.local_world_size):
+                global_rank = global_start_rank + local_rank
+                is_driver_worker = self._is_driver_worker(global_rank)
+                unready_worker_handle = WorkerProc.make_worker_process(
+                    vllm_config=self.vllm_config,
+                    local_rank=local_rank,
+                    rank=global_rank,
+                    distributed_init_method=distributed_init_method,
+                    input_shm_handle=scheduler_output_handle,
+                    shared_worker_lock=shared_worker_lock,
+                    is_driver_worker=is_driver_worker,
+                    inherited_fds=inherited_fds,
+                )
+                unready_workers.append(unready_worker_handle)
+                if inherited_fds is not None:
+                    inherited_fds.append(unready_worker_handle.death_writer.fileno())
+                    inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
+            workers = WorkerProc.wait_for_ready(unready_workers)
+            success = True
+            return workers
+        finally:
+            if not success:
+                # Close death_writers to signal workers to exit
                 for uw in unready_workers:
                     if uw.death_writer is not None:
                         uw.death_writer.close()
                         uw.death_writer = None
-                self._ensure_worker_termination([uw.proc for uw in unready_workers])
-
-        self.output_rank = self._get_output_rank()
+                self._ensure_worker_termination(
+                    [uw.proc for uw in unready_workers if uw.proc is not None]
+                )
 
     def _get_parallel_sizes(self) -> tuple[int, int, int]:
         self.world_size = self.parallel_config.world_size
@@ -262,14 +278,24 @@ class MultiprocExecutor(Executor):
         # logs an error, shuts down the executor and invokes the failure
         # callback to inform the engine.
         def monitor_workers():
-            sentinels = [h.proc.sentinel for h in workers]
+            sentinels = [h.proc.sentinel for h in workers if h.proc is not None]
+            if not sentinels:
+                # All workers are RPC workers (no local process to monitor)
+                return
             died = multiprocessing.connection.wait(sentinels)
             _self = self_ref()
             if not _self or getattr(_self, "shutting_down", False):
                 logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
                 return
             _self.is_failed = True
-            proc_name = next(h.proc.name for h in workers if h.proc.sentinel == died[0])
+            proc_name = next(
+                (
+                    h.proc.name
+                    for h in workers
+                    if h.proc is not None and h.proc.sentinel == died[0]
+                ),
+                "unknown",
+            )
             logger.error(
                 "Worker proc %s died unexpectedly, shutting down executor.", proc_name
             )
@@ -439,13 +465,16 @@ class MultiprocExecutor(Executor):
             self.shutting_down = True
 
             # Make sure all the worker processes are terminated first.
-            if workers := getattr(self, "workers", None):
+            workers = getattr(self, "workers", None)
+            if workers is not None:
                 for w in workers:
                     # Close death_writer to signal child processes to exit
                     if w.death_writer is not None:
                         w.death_writer.close()
                         w.death_writer = None
-                self._ensure_worker_termination([w.proc for w in workers])
+                self._ensure_worker_termination(
+                    [w.proc for w in workers if w.proc is not None]
+                )
 
                 for w in workers:
                     # Shutdown response queues
@@ -496,15 +525,15 @@ class MultiprocExecutor(Executor):
 class UnreadyWorkerProcHandle:
     """WorkerProcess handle before READY."""
 
-    proc: BaseProcess
+    proc: BaseProcess | None  # None for RPC workers
     rank: int
-    ready_pipe: Connection
+    ready_pipe: Connection | socket.socket  # Can be socket for RPC
     death_writer: Connection | None = None
 
 
 @dataclass
 class WorkerProcHandle:
-    proc: BaseProcess
+    proc: BaseProcess | None  # None for RPC workers
     rank: int
     # The worker process writes to this MQ in single-node mode
     worker_response_mq: MessageQueue | None
@@ -644,7 +673,7 @@ class WorkerProc:
         shared_worker_lock: LockType,
         is_driver_worker: bool,
         inherited_fds: list[int] | None = None,
-    ) -> UnreadyWorkerProcHandle:
+    ) -> "UnreadyWorkerProcHandle":
         context = get_mp_context()
         # Ready pipe to communicate readiness from child to parent
         ready_reader, ready_writer = context.Pipe(duplex=False)
@@ -684,8 +713,8 @@ class WorkerProc:
 
     @staticmethod
     def wait_for_response_handle_ready(
-        handles: dict[str, Any], proc_handle: UnreadyWorkerProcHandle
-    ) -> WorkerProcHandle:
+        handles: dict[str, Any], proc_handle: "UnreadyWorkerProcHandle"
+    ) -> "WorkerProcHandle":
         response_handle = handles["handle"]
         worker_response_mq: MessageQueue | None = None
         if len(response_handle.local_reader_ranks) > 0:
@@ -705,8 +734,8 @@ class WorkerProc:
 
     @staticmethod
     def wait_for_ready(
-        unready_proc_handles: list[UnreadyWorkerProcHandle],
-    ) -> list[WorkerProcHandle]:
+        unready_proc_handles: list["UnreadyWorkerProcHandle"],
+    ) -> list["WorkerProcHandle"]:
         e = Exception(
             "WorkerProc initialization failed due to an exception in a "
             "background process. See stack trace for root cause."
@@ -935,6 +964,9 @@ class WorkerProc:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
                 indefinite=True
             )
+            if method == "shutdown":
+                logger.info("Received shutdown command. Exiting busy loop.")
+                break
             try:
                 if isinstance(method, str):
                     func = getattr(self.worker, method)
