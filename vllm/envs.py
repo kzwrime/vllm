@@ -197,6 +197,9 @@ if TYPE_CHECKING:
     VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
+    VLLM_USE_MP_RPC_WORKERS: bool = False
+    VLLM_MP_RPC_READY_BASE_PORT: int = 28888
+    VLLM_FORCE_ZMQ_TCP: bool = False
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = True
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
     VLLM_NVFP4_GEMM_BACKEND: str | None = None
@@ -1426,6 +1429,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Used to force set up loopback IP
     "VLLM_LOOPBACK_IP": lambda: os.getenv("VLLM_LOOPBACK_IP", ""),
+    # When set to 1, use mp_rpc executor (independently-started workers
+    # connect via TCP) instead of the default mp executor (fork/spawn).
+    # Only effective when distributed_executor_backend == "mp".
+    "VLLM_USE_MP_RPC_WORKERS": lambda: bool(
+        int(os.getenv("VLLM_USE_MP_RPC_WORKERS", "0"))
+    ),
+    # Used to get READY_BASE_PORT in multiproc_rpc_executor
+    "VLLM_MP_RPC_READY_BASE_PORT": lambda: int(
+        os.getenv("VLLM_MP_RPC_READY_BASE_PORT", "28888")
+    ),
+    # When set to 1, force ZMQ MessageQueue to use TCP sockets instead of IPC
+    # (Unix domain sockets). Needed when workers are on separate nodes that
+    # share /dev/shm but have separate /tmp filesystems.
+    "VLLM_FORCE_ZMQ_TCP": lambda: bool(int(os.getenv("VLLM_FORCE_ZMQ_TCP", "0"))),
     # Used to set the process name prefix for vLLM processes.
     # This is useful for debugging and monitoring purposes.
     # The default value is "VLLM".

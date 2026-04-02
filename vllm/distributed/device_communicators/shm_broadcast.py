@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+import os
 import pickle
 import sys
 import threading
@@ -362,6 +363,14 @@ class MessageQueue:
         max_chunks: int = 10,
         connect_ip: str | None = None,
     ):
+        # When VLLM_FORCE_ZMQ_TCP is set, treat all readers as remote so ZMQ
+        # uses TCP sockets instead of IPC (Unix domain sockets).  This is
+        # needed when /dev/shm is shared across container boundaries but /tmp
+        # (where IPC socket files live) is not.
+        if int(os.environ.get("VLLM_FORCE_ZMQ_TCP", "0")):
+            n_local_reader = 0
+            local_reader_ranks = []
+
         if local_reader_ranks is None:
             local_reader_ranks = list(range(n_local_reader))
         else:
@@ -875,9 +884,15 @@ class MessageQueue:
             group_rank = pg.rank
             group_world_size = pg.world_size
             global_ranks = list(range(pg.world_size))
+        import vllm.envs as envs
         from vllm.distributed.parallel_state import in_the_same_node_as
 
         status = in_the_same_node_as(pg, source_rank=writer_rank)
+        # If VLLM_FORCE_ZMQ_TCP is set, treat all non-writer ranks as remote
+        # so ZMQ uses TCP instead of IPC (needed when /dev/shm is shared across
+        # containers but Unix domain socket namespaces are separate).
+        if envs.VLLM_FORCE_ZMQ_TCP:
+            status = [i == writer_rank for i in range(len(status))]
         if group_rank == writer_rank:
             if external_writer_handle is not None:
                 buffer_io = MessageQueue.create_from_handle(
