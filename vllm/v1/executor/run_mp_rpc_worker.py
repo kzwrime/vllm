@@ -33,6 +33,7 @@ def parse_args():
     )
     parser.add_argument(
         "--executor-addr",
+        "--executor-ip",
         type=str,
         required=True,
         help="IP address of the executor to connect to",
