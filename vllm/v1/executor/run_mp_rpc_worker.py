@@ -198,6 +198,17 @@ def rpc_worker_main(
 def main():
     args = parse_args()
 
+    # import mpi before import vllm
+    if bool(int(os.getenv("VLLM_CPU_USE_MPI", "0"))):
+        from mpi4py import MPI
+
+        print(
+            f"[rank={MPI.COMM_WORLD.Get_rank()}][{MPI.Get_processor_name()}] "
+            f"MPI.Is_initialized()={MPI.Is_initialized()}",
+            flush=True,
+        )
+        MPI.COMM_WORLD.Barrier()
+
     # Set RPC mode
     os.environ["VLLM_USE_MP_RPC"] = "1"
 
