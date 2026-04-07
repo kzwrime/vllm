@@ -635,13 +635,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         else:
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-                torch.ops.vllm.unified_mla_attention_with_output(
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    output,
-                    self.layer_name,
-                )
+                if getattr(self.attn_backend, "use_direct_unified_op", None):
+                    unified_mla_attention_with_output(
+                        q,
+                        kv_c_normed,
+                        k_pe,
+                        output,
+                        self.layer_name,
+                    )
+                else:
+                    torch.ops.vllm.unified_mla_attention_with_output(
+                        q,
+                        kv_c_normed,
+                        k_pe,
+                        output,
+                        self.layer_name,
+                    )
                 return output
             else:
                 return torch.ops.vllm.unified_mla_attention(

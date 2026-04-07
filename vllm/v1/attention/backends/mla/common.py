@@ -260,6 +260,7 @@ except ImportError:
     # For rocm use upstream flash attention
     if current_platform.is_rocm():
         from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
+    flash_attn_varlen_func = None
     is_vllm_fa = False
 
 try:
