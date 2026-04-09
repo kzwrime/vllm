@@ -268,6 +268,12 @@ def apply_top_k_top_p_pytorch(
 
     The logits tensor may be updated in-place.
     """
+    # Ensure k and p are on the same device as logits
+    if k is not None and k.device != logits.device:
+        k = k.to(logits.device)
+    if p is not None and p.device != logits.device:
+        p = p.to(logits.device)
+
     if p is None:
         if k is None:
             return logits
@@ -288,9 +294,18 @@ def apply_top_k_top_p_pytorch(
 
     if p is not None:
         # Apply top-p.
+        # Ensure all operations happen on the same device as logits_sort
+        p_device = p.to(logits_sort.device)
         probs_sort = logits_sort.softmax(dim=-1)
         probs_sum = torch.cumsum(probs_sort, dim=-1, out=probs_sort)
-        top_p_mask = probs_sum <= 1 - p.unsqueeze(dim=1)
+        # Explicitly ensure probs_sum is on the correct device
+        if probs_sum.device != logits_sort.device:
+            probs_sum = probs_sum.to(logits_sort.device)
+        # Create threshold on the same device to avoid device mismatch
+        threshold = (1 - p_device).unsqueeze(dim=1)
+        if threshold.device != logits_sort.device:
+            threshold = threshold.to(logits_sort.device)
+        top_p_mask = probs_sum <= threshold
         # at least one
         top_p_mask[:, -1] = False
         logits_sort.masked_fill_(top_p_mask, -float("inf"))
