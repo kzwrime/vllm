@@ -4,7 +4,7 @@ from collections.abc import Iterable
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
@@ -109,6 +109,19 @@ class BlockTables:
         num_reqs_padded: int,
     ) -> tuple[torch.Tensor, ...]:
         num_reqs = idx_mapping.shape[0]
+        if not HAS_TRITON:
+            # Pure-PyTorch fallback: copy block table rows by request index.
+            for group_id in range(self.num_kv_cache_groups):
+                src = self.block_tables[group_id].gpu
+                dst = self.input_block_tables[group_id]
+                for batch_idx in range(num_reqs):
+                    req_idx = int(idx_mapping[batch_idx].item())
+                    n = int(self.num_blocks.gpu[group_id, req_idx].item())
+                    dst[batch_idx, :n] = src[req_idx, :n]
+                    dst[batch_idx, n:] = 0
+                if num_reqs < num_reqs_padded:
+                    dst[num_reqs:num_reqs_padded] = 0
+            return tuple(bt[:num_reqs_padded] for bt in self.input_block_tables)
         # Launch kernel with num_reqs_padded to fuse zeroing of padded rows.
         _gather_block_tables_kernel[(self.num_kv_cache_groups, num_reqs_padded)](
             idx_mapping,
@@ -138,6 +151,43 @@ class BlockTables:
         num_tokens_padded: int,
     ) -> torch.Tensor:
         num_reqs = idx_mapping.shape[0]
+        if not HAS_TRITON:
+            # Pure-PyTorch fallback: compute slot IDs from block tables.
+            cp_size = self.cp_size
+            cp_rank = self.cp_rank
+            cp_interleave = self.cp_interleave
+            for group_id in range(self.num_kv_cache_groups):
+                src = self.block_tables[group_id].gpu
+                slot_map = self.slot_mappings[group_id]
+                block_size = self.block_sizes[group_id]
+                for batch_idx in range(num_reqs):
+                    req = int(idx_mapping[batch_idx].item())
+                    start = int(query_start_loc[batch_idx].item())
+                    end = int(query_start_loc[batch_idx + 1].item())
+                    if start >= end:
+                        continue
+                    pos = positions[start:end].long()
+                    if cp_size == 1:
+                        block_idx = pos // block_size
+                        block_off = pos % block_size
+                        block_num = src[req, block_idx].long()
+                        slot_map[start:end] = block_num * block_size + block_off
+                    else:
+                        block_idx = pos // (block_size * cp_size)
+                        block_off = pos % (block_size * cp_size)
+                        block_num = src[req, block_idx].long()
+                        is_local = (block_off // cp_interleave) % cp_size == cp_rank
+                        rounds = block_off // (cp_interleave * cp_size)
+                        remainder = block_off % cp_interleave
+                        local_off = rounds * cp_interleave + remainder
+                        slot_ids = block_num * block_size + local_off
+                        slot_map[start:end] = torch.where(
+                            is_local, slot_ids, torch.full_like(slot_ids, PAD_SLOT_ID)
+                        )
+                # Pad tokens beyond actual count.
+                actual_end = int(query_start_loc[num_reqs].item())
+                slot_map[actual_end : self.max_num_batched_tokens] = PAD_SLOT_ID
+            return self.slot_mappings[:, :num_tokens_padded]
         num_groups = self.num_kv_cache_groups
         _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
             self.max_num_batched_tokens,

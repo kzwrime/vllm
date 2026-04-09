@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.utils.math_utils import cdiv
 
 
 @triton.jit
@@ -31,6 +32,12 @@ def _temperature_kernel(
     tl.store(logits_ptr + token_idx * logits_stride + block, logits, mask=mask)
 
 
+if not HAS_TRITON:
+    # Shadow the Triton JIT function above with the pure-PyTorch FuncWrapper.
+    # Mirrors vllm/utils/torch_triton_utils.py::_temperature_kernel_impl.
+    from vllm.utils.torch_triton_utils import _temperature_kernel  # noqa: F811
+
+
 def apply_temperature(
     logits: torch.Tensor,
     expanded_idx_mapping: torch.Tensor,
@@ -38,7 +45,9 @@ def apply_temperature(
 ) -> None:
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 8192
-    num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
+    num_blocks = cdiv(vocab_size, BLOCK_SIZE)
+    # _temperature_kernel is either the Triton JIT kernel or the PyTorch
+    # FuncWrapper from torch_triton_utils, depending on HAS_TRITON.
     _temperature_kernel[(num_tokens, num_blocks)](
         logits,
         logits.stride(0),
@@ -140,29 +149,46 @@ def gumbel_sample(
     apply_temperature: bool,
     processed_logits_out: torch.Tensor | None = None,  # [num_reqs, vocab_size]
 ) -> torch.Tensor:
-    num_tokens, vocab_size = logits.shape
-    BLOCK_SIZE = 1024
-    num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-    local_argmax = logits.new_empty(num_tokens, num_blocks, dtype=torch.int64)
-    local_max = logits.new_empty(num_tokens, num_blocks, dtype=torch.float64)
-    _gumbel_sample_kernel[(num_tokens, num_blocks)](
-        local_argmax,
-        local_argmax.stride(0),
-        local_max,
-        local_max.stride(0),
-        processed_logits_out,
-        processed_logits_out.stride(0) if processed_logits_out is not None else 0,
-        logits,
-        logits.stride(0),
-        expanded_idx_mapping,
-        seed,
-        pos,
-        temperature,
-        vocab_size,
-        BLOCK_SIZE=BLOCK_SIZE,
-        APPLY_TEMPERATURE=apply_temperature,
-    )
-    # NOTE(woosuk): Use int64 for later indexing.
-    max_block_idx = local_max.argmax(dim=-1, keepdim=True)
-    sampled = local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
-    return sampled
+    if HAS_TRITON:
+        num_tokens, vocab_size = logits.shape
+        BLOCK_SIZE = 1024
+        num_blocks = cdiv(vocab_size, BLOCK_SIZE)
+        local_argmax = logits.new_empty(num_tokens, num_blocks, dtype=torch.int64)
+        local_max = logits.new_empty(num_tokens, num_blocks, dtype=torch.float64)
+        _gumbel_sample_kernel[(num_tokens, num_blocks)](
+            local_argmax,
+            local_argmax.stride(0),
+            local_max,
+            local_max.stride(0),
+            processed_logits_out,
+            processed_logits_out.stride(0) if processed_logits_out is not None else 0,
+            logits,
+            logits.stride(0),
+            expanded_idx_mapping,
+            seed,
+            pos,
+            temperature,
+            vocab_size,
+            BLOCK_SIZE=BLOCK_SIZE,
+            APPLY_TEMPERATURE=apply_temperature,
+        )
+        max_block_idx = local_max.argmax(dim=-1, keepdim=True)
+        return local_argmax.gather(dim=-1, index=max_block_idx).view(-1)
+    else:
+        # Delegate to the pure-PyTorch implementation in torch_triton_utils.
+        # The Triton kernel uses a different interface (local_argmax/local_max
+        # intermediate buffers), so we call the impl directly here.
+        # Mirrors vllm/utils/torch_triton_utils.py::_gumbel_sample_kernel_impl.
+        from vllm.utils.torch_triton_utils import _gumbel_sample_kernel_impl
+
+        return _gumbel_sample_kernel_impl(
+            logits,
+            logits.stride(0),
+            expanded_idx_mapping,
+            temperature,
+            seed,
+            pos,
+            logits.shape[1],
+            processed_logits_out=processed_logits_out,
+            apply_temperature=apply_temperature,
+        )

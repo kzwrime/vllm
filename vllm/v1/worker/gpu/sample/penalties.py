@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from vllm.sampling_params import SamplingParams
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
@@ -189,6 +189,12 @@ def _penalties_kernel(
     tl.store(logits_ptr + token_idx * logits_stride + block, logits, mask=mask)
 
 
+if not HAS_TRITON:
+    # Shadow the Triton JIT function above with the pure-PyTorch FuncWrapper.
+    # Mirrors vllm/utils/torch_triton_utils.py::_penalties_kernel_impl.
+    from vllm.utils.torch_triton_utils import _penalties_kernel  # noqa: F811
+
+
 def apply_penalties(
     logits: torch.Tensor,
     expanded_idx_mapping: torch.Tensor,
@@ -203,7 +209,8 @@ def apply_penalties(
 ) -> None:
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 8192
-    num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
+    num_blocks = cdiv(vocab_size, BLOCK_SIZE)
+    # _penalties_kernel is either the Triton JIT kernel or the PyTorch FuncWrapper.
     _penalties_kernel[(num_tokens, num_blocks)](
         logits,
         logits.stride(0),
@@ -275,6 +282,12 @@ def _bincount_kernel(
         )
 
 
+if not HAS_TRITON:
+    # Shadow the Triton JIT function above with the pure-PyTorch FuncWrapper.
+    # Mirrors vllm/utils/torch_triton_utils.py::_bincount_kernel_impl.
+    from vllm.utils.torch_triton_utils import _bincount_kernel  # noqa: F811
+
+
 def bincount(
     expanded_idx_mapping: torch.Tensor,
     all_token_ids: torch.Tensor,
@@ -288,7 +301,8 @@ def bincount(
     output_bin_counts[expanded_idx_mapping] = 0
     num_tokens = expanded_idx_mapping.shape[0]
     BLOCK_SIZE = 1024
-    num_blocks = triton.cdiv(max_prefill_len, BLOCK_SIZE)
+    num_blocks = cdiv(max_prefill_len, BLOCK_SIZE)
+    # _bincount_kernel is either the Triton JIT kernel or the PyTorch FuncWrapper.
     _bincount_kernel[(num_tokens, num_blocks)](
         expanded_idx_mapping,
         all_token_ids,

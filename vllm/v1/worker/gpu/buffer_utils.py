@@ -6,7 +6,7 @@ from functools import partial
 import numpy as np
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.platform_utils import is_uva_available
 from vllm.utils.torch_utils import (
     async_tensor_h2d,
@@ -161,25 +161,42 @@ class StagedWriteTensor:
         if n == 0:
             return
 
-        indices_uva = self.write_indices.copy_to_uva(self._staged_write_indices)
-        starts_uva = self.write_starts.copy_to_uva(self._staged_write_starts)
-        cu_lens_uva = self.write_cu_lens.copy_to_uva(self._staged_write_cu_lens)
+        if HAS_TRITON:
+            indices_uva = self.write_indices.copy_to_uva(self._staged_write_indices)
+            starts_uva = self.write_starts.copy_to_uva(self._staged_write_starts)
+            cu_lens_uva = self.write_cu_lens.copy_to_uva(self._staged_write_cu_lens)
 
-        # Special handling for write_contents
-        write_contents = async_tensor_h2d(
-            self._staged_write_contents, self.dtype, self.device, pin_memory=True
-        )
+            # Special handling for write_contents
+            write_contents = async_tensor_h2d(
+                self._staged_write_contents, self.dtype, self.device, pin_memory=True
+            )
 
-        # Write diffs to the GPU buffer
-        _apply_write_kernel[(n,)](
-            self.gpu,
-            self.gpu.stride(0),
-            indices_uva,
-            starts_uva,
-            write_contents,
-            cu_lens_uva,
-            BLOCK_SIZE=1024,
-        )
+            # Write diffs to the GPU buffer
+            _apply_write_kernel[(n,)](
+                self.gpu,
+                self.gpu.stride(0),
+                indices_uva,
+                starts_uva,
+                write_contents,
+                cu_lens_uva,
+                BLOCK_SIZE=1024,
+            )
+        else:
+            # Pure-PyTorch fallback: scatter-write without Triton.
+            stride = self.gpu.stride(0)
+            gpu_flat = self.gpu.view(-1)
+            cu_start = 0
+            for pid in range(n):
+                row_idx = self._staged_write_indices[pid]
+                start_idx = self._staged_write_starts[pid]
+                cu_end = self._staged_write_cu_lens[pid]
+                content = self._staged_write_contents[cu_start:cu_end]
+                flat_start = row_idx * stride + start_idx
+                gpu_flat[flat_start : flat_start + len(content)] = torch.tensor(
+                    content, dtype=self.dtype, device=self.device
+                )
+                cu_start = cu_end
+
         # Clear the staged writes
         self.clear_staged_writes()
 

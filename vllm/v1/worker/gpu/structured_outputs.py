@@ -3,7 +3,7 @@
 import numpy as np
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -63,8 +63,11 @@ class StructuredOutputsWorker:
         num_masks = bitmask.shape[0]
         assert num_masks == len(mapping)
         vocab_size = logits.shape[-1]
+
         BLOCK_SIZE = 8192
-        grid = (num_masks, triton.cdiv(vocab_size, BLOCK_SIZE))
+        grid = (num_masks, cdiv(vocab_size, BLOCK_SIZE))
+        # _apply_grammar_bitmask_kernel is either the Triton JIT kernel or the
+        # PyTorch FuncWrapper from torch_triton_utils, depending on HAS_TRITON.
         _apply_grammar_bitmask_kernel[grid](
             logits,
             logits.stride(0),
@@ -112,4 +115,12 @@ def _apply_grammar_bitmask_kernel(
         logits_ptr + logits_idx * logits_stride + block_offset,
         -float("inf"),
         mask=bitmask & (block_offset < vocab_size),
+    )
+
+
+if not HAS_TRITON:
+    # Shadow the Triton JIT function above with the pure-PyTorch FuncWrapper.
+    # Mirrors vllm/utils/torch_triton_utils.py::_apply_grammar_bitmask_kernel_impl.
+    from vllm.utils.torch_triton_utils import (  # noqa: F811
+        apply_grammar_bitmask_kernel as _apply_grammar_bitmask_kernel,
     )

@@ -6,7 +6,7 @@ import numpy as np
 import torch
 
 from vllm.sampling_params import SamplingParams
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
@@ -157,6 +157,13 @@ def _prompt_logprobs_token_ids_kernel(
         tl.store(
             prompt_logprobs_token_ids_ptr + query_start + block, token_ids, mask=mask
         )
+
+
+if not HAS_TRITON:
+    # Mirrors vllm/utils/torch_triton_utils.py::_prompt_logprobs_token_ids_kernel_impl.
+    from vllm.utils.torch_triton_utils import (
+        _prompt_logprobs_token_ids_kernel,  # noqa: F811
+    )
 
 
 def get_prompt_logprobs_token_ids(

@@ -5,8 +5,13 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils import random_uuid
+
+if not HAS_TRITON:
+    # Import the module once; each fallback function is assigned via attribute
+    # access below so that ruff's F811 auto-fix does not interfere.
+    import vllm.utils.torch_triton_utils as _ttu
 
 
 class InputBuffers:
@@ -183,27 +188,32 @@ def _prepare_prefill_inputs_kernel(
         tl.store(next_prefill_tokens_ptr + req_state_idx, next_token)
 
 
-def prepare_prefill_inputs(
-    input_ids: torch.Tensor,
-    next_prefill_tokens: torch.Tensor,
-    idx_mapping: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    all_token_ids: torch.Tensor,
-    prefill_len: torch.Tensor,
-    num_computed_tokens: torch.Tensor,
-) -> None:
-    num_reqs = idx_mapping.shape[0]
-    _prepare_prefill_inputs_kernel[(num_reqs,)](
-        input_ids,
-        next_prefill_tokens,
-        idx_mapping,
-        query_start_loc,
-        all_token_ids,
-        all_token_ids.stride(0),
-        prefill_len,
-        num_computed_tokens,
-        BLOCK_SIZE=1024,
-    )
+if HAS_TRITON:
+
+    def prepare_prefill_inputs(
+        input_ids: torch.Tensor,
+        next_prefill_tokens: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        all_token_ids: torch.Tensor,
+        prefill_len: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
+    ) -> None:
+        num_reqs = idx_mapping.shape[0]
+        _prepare_prefill_inputs_kernel[(num_reqs,)](
+            input_ids,
+            next_prefill_tokens,
+            idx_mapping,
+            query_start_loc,
+            all_token_ids,
+            all_token_ids.stride(0),
+            prefill_len,
+            num_computed_tokens,
+            BLOCK_SIZE=1024,
+        )
+else:
+    # Mirrors vllm/utils/torch_triton_utils.py::prepare_prefill_inputs.
+    prepare_prefill_inputs = _ttu.prepare_prefill_inputs
 
 
 @triton.jit
@@ -243,25 +253,30 @@ def _prepare_pos_seq_lens_kernel(
         tl.store(pos_ptr + start + block, pos, mask=mask)
 
 
-def prepare_pos_seq_lens(
-    idx_mapping: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    num_computed_tokens: torch.Tensor,
-    pos: torch.Tensor,
-    seq_lens: torch.Tensor,
-) -> None:
-    num_reqs = idx_mapping.shape[0]
-    # NOTE(woosuk): We do +1 because the last thread block is used
-    # to pad unused seq_lens as 0 for full CUDA graphs.
-    _prepare_pos_seq_lens_kernel[(num_reqs + 1,)](
-        pos,
-        seq_lens,
-        idx_mapping,
-        query_start_loc,
-        num_computed_tokens,
-        seq_lens.shape[0],
-        BLOCK_SIZE=1024,
-    )
+if HAS_TRITON:
+
+    def prepare_pos_seq_lens(
+        idx_mapping: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
+        pos: torch.Tensor,
+        seq_lens: torch.Tensor,
+    ) -> None:
+        num_reqs = idx_mapping.shape[0]
+        # NOTE(woosuk): We do +1 because the last thread block is used
+        # to pad unused seq_lens as 0 for full CUDA graphs.
+        _prepare_pos_seq_lens_kernel[(num_reqs + 1,)](
+            pos,
+            seq_lens,
+            idx_mapping,
+            query_start_loc,
+            num_computed_tokens,
+            seq_lens.shape[0],
+            BLOCK_SIZE=1024,
+        )
+else:
+    # Mirrors vllm/utils/torch_triton_utils.py::prepare_pos_seq_lens.
+    prepare_pos_seq_lens = _ttu.prepare_pos_seq_lens
 
 
 @triton.jit
@@ -321,42 +336,41 @@ def _combine_sampled_and_draft_tokens_kernel(
         )
 
 
-def combine_sampled_and_draft_tokens(
-    input_ids: torch.Tensor,
-    idx_mapping: torch.Tensor,
-    last_sampled_tokens: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    seq_lens: torch.Tensor,
-    prefill_len: torch.Tensor,
-    draft_tokens: torch.Tensor,
-    cu_num_logits: torch.Tensor,
-    num_logits: int,
-) -> torch.Tensor:
-    # use idx_mapping.shape[0] for actual request count
-    num_reqs = idx_mapping.shape[0]
-    num_speculative_steps = draft_tokens.shape[-1]
+if HAS_TRITON:
 
-    logits_indices = torch.empty(
-        num_logits,
-        dtype=torch.int64,
-        device=input_ids.device,
-    )
-    _combine_sampled_and_draft_tokens_kernel[(num_reqs,)](
-        input_ids,
-        idx_mapping,
-        last_sampled_tokens,
-        query_start_loc,
-        seq_lens,
-        prefill_len,
-        draft_tokens,
-        draft_tokens.stride(0),
-        cu_num_logits,
-        logits_indices,
-        # NOTE(woosuk): Add 1 to ensure the block can cover the last sampled token
-        # in addition to all draft tokens.
-        BLOCK_SIZE=triton.next_power_of_2(num_speculative_steps + 1),
-    )
-    return logits_indices
+    def combine_sampled_and_draft_tokens(
+        input_ids: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        last_sampled_tokens: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        seq_lens: torch.Tensor,
+        prefill_len: torch.Tensor,
+        draft_tokens: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        num_logits: int,
+    ) -> torch.Tensor:
+        num_reqs = idx_mapping.shape[0]
+        num_speculative_steps = draft_tokens.shape[-1]
+        logits_indices = torch.empty(
+            num_logits, dtype=torch.int64, device=input_ids.device
+        )
+        _combine_sampled_and_draft_tokens_kernel[(num_reqs,)](
+            input_ids,
+            idx_mapping,
+            last_sampled_tokens,
+            query_start_loc,
+            seq_lens,
+            prefill_len,
+            draft_tokens,
+            draft_tokens.stride(0),
+            cu_num_logits,
+            logits_indices,
+            BLOCK_SIZE=triton.next_power_of_2(num_speculative_steps + 1),
+        )
+        return logits_indices
+else:
+    # Mirrors vllm/utils/torch_triton_utils.py::combine_sampled_and_draft_tokens.
+    combine_sampled_and_draft_tokens = _ttu.combine_sampled_and_draft_tokens
 
 
 @triton.jit
@@ -388,24 +402,29 @@ def _get_num_sampled_and_rejected_kernel(
     tl.store(num_rejected_ptr + batch_idx, num_rejected)
 
 
-def get_num_sampled_and_rejected(
-    num_sampled: torch.Tensor,
-    seq_lens: torch.Tensor,
-    cu_num_logits: torch.Tensor,
-    idx_mapping: torch.Tensor,
-    prefill_len: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    num_reqs = idx_mapping.shape[0]
-    num_rejected = torch.empty_like(num_sampled)
-    _get_num_sampled_and_rejected_kernel[(num_reqs,)](
-        num_sampled,
-        num_rejected,
-        seq_lens,
-        cu_num_logits,
-        idx_mapping,
-        prefill_len,
-    )
-    return num_sampled, num_rejected
+if HAS_TRITON:
+
+    def get_num_sampled_and_rejected(
+        num_sampled: torch.Tensor,
+        seq_lens: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        prefill_len: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_reqs = idx_mapping.shape[0]
+        num_rejected = torch.empty_like(num_sampled)
+        _get_num_sampled_and_rejected_kernel[(num_reqs,)](
+            num_sampled,
+            num_rejected,
+            seq_lens,
+            cu_num_logits,
+            idx_mapping,
+            prefill_len,
+        )
+        return num_sampled, num_rejected
+else:
+    # Mirrors vllm/utils/torch_triton_utils.py::get_num_sampled_and_rejected.
+    get_num_sampled_and_rejected = _ttu.get_num_sampled_and_rejected
 
 
 @triton.jit
@@ -462,45 +481,50 @@ def _post_update_kernel(
     tl.store(num_computed_tokens_ptr + req_state_idx, num_computed)
 
 
-def post_update(
-    # [num_reqs]
-    idx_mapping: torch.Tensor,
-    # [max_num_reqs]
-    num_computed_tokens: torch.Tensor,
-    # [max_num_reqs]
-    last_sampled_tokens: torch.Tensor,
-    # [max_num_reqs, vocab_size]
-    output_bin_counts: torch.Tensor | None,
-    # [num_reqs, num_speculative_steps + 1]
-    sampled_tokens: torch.Tensor,
-    # [num_reqs]
-    num_sampled: torch.Tensor,
-    # [num_reqs]
-    num_rejected: torch.Tensor,
-    # [num_reqs + 1]
-    query_start_loc: torch.Tensor,
-    # [max_num_reqs, max_model_len]
-    all_token_ids: torch.Tensor,
-    # [max_num_reqs]
-    total_len: torch.Tensor,
-) -> None:
-    num_reqs = idx_mapping.shape[0]
-    _post_update_kernel[(num_reqs,)](
-        idx_mapping,
-        num_computed_tokens,
-        last_sampled_tokens,
-        output_bin_counts,
-        output_bin_counts.stride(0) if output_bin_counts is not None else 0,
-        sampled_tokens,
-        sampled_tokens.stride(0),
-        num_sampled,
-        num_rejected,
-        query_start_loc,
-        all_token_ids,
-        all_token_ids.stride(0),
-        total_len,
-        num_warps=1,
-    )
+if HAS_TRITON:
+
+    def post_update(
+        # [num_reqs]
+        idx_mapping: torch.Tensor,
+        # [max_num_reqs]
+        num_computed_tokens: torch.Tensor,
+        # [max_num_reqs]
+        last_sampled_tokens: torch.Tensor,
+        # [max_num_reqs, vocab_size]
+        output_bin_counts: torch.Tensor | None,
+        # [num_reqs, num_speculative_steps + 1]
+        sampled_tokens: torch.Tensor,
+        # [num_reqs]
+        num_sampled: torch.Tensor,
+        # [num_reqs]
+        num_rejected: torch.Tensor,
+        # [num_reqs + 1]
+        query_start_loc: torch.Tensor,
+        # [max_num_reqs, max_model_len]
+        all_token_ids: torch.Tensor,
+        # [max_num_reqs]
+        total_len: torch.Tensor,
+    ) -> None:
+        num_reqs = idx_mapping.shape[0]
+        _post_update_kernel[(num_reqs,)](
+            idx_mapping,
+            num_computed_tokens,
+            last_sampled_tokens,
+            output_bin_counts,
+            output_bin_counts.stride(0) if output_bin_counts is not None else 0,
+            sampled_tokens,
+            sampled_tokens.stride(0),
+            num_sampled,
+            num_rejected,
+            query_start_loc,
+            all_token_ids,
+            all_token_ids.stride(0),
+            total_len,
+            num_warps=1,
+        )
+else:
+    # Mirrors vllm/utils/torch_triton_utils.py::post_update.
+    post_update = _ttu.post_update
 
 
 @triton.jit
@@ -519,20 +543,25 @@ def _post_update_pool_kernel(
     tl.store(num_computed_tokens_ptr + req_state_idx, num_computed + query_len)
 
 
-def post_update_pool(
-    # [num_reqs]
-    idx_mapping: torch.Tensor,
-    # [max_num_reqs]
-    num_computed_tokens: torch.Tensor,
-    # [num_reqs + 1]
-    query_start_loc: torch.Tensor,
-) -> None:
-    num_reqs = idx_mapping.shape[0]
-    _post_update_pool_kernel[(num_reqs,)](
-        idx_mapping,
-        num_computed_tokens,
-        query_start_loc,
-    )
+if HAS_TRITON:
+
+    def post_update_pool(
+        # [num_reqs]
+        idx_mapping: torch.Tensor,
+        # [max_num_reqs]
+        num_computed_tokens: torch.Tensor,
+        # [num_reqs + 1]
+        query_start_loc: torch.Tensor,
+    ) -> None:
+        num_reqs = idx_mapping.shape[0]
+        _post_update_pool_kernel[(num_reqs,)](
+            idx_mapping,
+            num_computed_tokens,
+            query_start_loc,
+        )
+else:
+    # Mirrors vllm/utils/torch_triton_utils.py::post_update_pool.
+    post_update_pool = _ttu.post_update_pool
 
 
 @triton.jit
@@ -555,22 +584,27 @@ def _expand_idx_mapping_kernel(
     tl.store(expanded_local_pos_ptr + start_idx + block, block, mask=mask)
 
 
-def expand_idx_mapping(
-    idx_mapping: torch.Tensor,
-    total_num_logits: int,
-    cu_num_logits: torch.Tensor,
-    max_expand_len: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    num_reqs = idx_mapping.shape[0]
-    expanded_idx_mapping = idx_mapping.new_empty(total_num_logits)
-    expanded_local_pos = torch.empty(
-        total_num_logits, dtype=torch.int32, device=idx_mapping.device
-    )
-    _expand_idx_mapping_kernel[(num_reqs,)](
-        idx_mapping,
-        expanded_idx_mapping,
-        expanded_local_pos,
-        cu_num_logits,
-        BLOCK_SIZE=triton.next_power_of_2(max_expand_len),
-    )
-    return expanded_idx_mapping, expanded_local_pos
+if HAS_TRITON:
+
+    def expand_idx_mapping(
+        idx_mapping: torch.Tensor,
+        total_num_logits: int,
+        cu_num_logits: torch.Tensor,
+        max_expand_len: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_reqs = idx_mapping.shape[0]
+        expanded_idx_mapping = idx_mapping.new_empty(total_num_logits)
+        expanded_local_pos = torch.empty(
+            total_num_logits, dtype=torch.int32, device=idx_mapping.device
+        )
+        _expand_idx_mapping_kernel[(num_reqs,)](
+            idx_mapping,
+            expanded_idx_mapping,
+            expanded_local_pos,
+            cu_num_logits,
+            BLOCK_SIZE=triton.next_power_of_2(max_expand_len),
+        )
+        return expanded_idx_mapping, expanded_local_pos
+else:
+    # Mirrors vllm/utils/torch_triton_utils.py::expand_idx_mapping.
+    expand_idx_mapping = _ttu.expand_idx_mapping

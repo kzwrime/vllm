@@ -4,7 +4,8 @@ import numpy as np
 import torch
 
 from vllm.sampling_params import SamplingParams
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
 MAX_NUM_ALLOWED_TOKEN_IDS = 1024
@@ -235,6 +236,12 @@ def _bias_kernel(
         )
 
 
+if not HAS_TRITON:
+    # Shadow the Triton JIT function above with the pure-PyTorch FuncWrapper.
+    # Mirrors vllm/utils/torch_triton_utils.py::_bias_kernel_impl.
+    from vllm.utils.torch_triton_utils import _bias_kernel  # noqa: F811
+
+
 def apply_logit_bias(
     logits: torch.Tensor,
     expanded_idx_mapping: torch.Tensor,
@@ -249,7 +256,7 @@ def apply_logit_bias(
     stop_token_ids: torch.Tensor,
 ) -> None:
     num_tokens, vocab_size = logits.shape
-    BLOCK_SIZE = triton.next_power_of_2(
+    BLOCK_SIZE = next_power_of_2(
         max(
             allowed_token_ids.shape[-1],
             logit_bias_token_ids.shape[-1],

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
 
 
 @triton.jit
@@ -43,6 +43,11 @@ def _min_p_kernel(
         )
         logits = tl.where(logits < threshold, float("-inf"), logits)
         tl.store(logits_ptr + token_idx * logits_stride + block, logits, mask=mask)
+
+
+if not HAS_TRITON:
+    # Mirrors vllm/utils/torch_triton_utils.py::_min_p_kernel_impl.
+    from vllm.utils.torch_triton_utils import _min_p_kernel  # noqa: F811
 
 
 def apply_min_p(

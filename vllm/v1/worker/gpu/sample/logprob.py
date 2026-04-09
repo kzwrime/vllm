@@ -3,7 +3,8 @@
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.outputs import LogprobsTensors
 
 
@@ -49,6 +50,12 @@ def _topk_log_softmax_kernel(
     tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
 
 
+if not HAS_TRITON:
+    # Shadow the Triton JIT function above with the pure-PyTorch FuncWrapper.
+    # Mirrors vllm/utils/torch_triton_utils.py::_topk_log_softmax_kernel_impl.
+    from vllm.utils.torch_triton_utils import _topk_log_softmax_kernel  # noqa: F811
+
+
 @triton.jit
 def _ranks_kernel(
     output_ptr,
@@ -72,6 +79,12 @@ def _ranks_kernel(
     tl.store(output_ptr + req_idx, n)
 
 
+if not HAS_TRITON:
+    # Shadow the Triton JIT function above with the pure-PyTorch FuncWrapper.
+    # Mirrors vllm/utils/torch_triton_utils.py::_ranks_kernel_impl.
+    from vllm.utils.torch_triton_utils import _ranks_kernel  # noqa: F811
+
+
 def compute_token_logprobs(
     logits: torch.Tensor, token_ids: torch.Tensor
 ) -> torch.Tensor:
@@ -79,6 +92,8 @@ def compute_token_logprobs(
     token_ids = token_ids.to(torch.int64)
     num_logprobs = token_ids.shape[1]
     logprobs = logits.new_empty((batch_size, num_logprobs), dtype=torch.float32)
+    # _topk_log_softmax_kernel is either the Triton JIT kernel or the PyTorch
+    # FuncWrapper from torch_triton_utils, depending on HAS_TRITON.
     _topk_log_softmax_kernel[(batch_size,)](
         logprobs,
         logits,
@@ -86,8 +101,8 @@ def compute_token_logprobs(
         token_ids,
         num_logprobs,
         vocab_size,
-        BLOCK_SIZE=1024,  # type: ignore
-        PADDED_TOPK=triton.next_power_of_2(num_logprobs),
+        BLOCK_SIZE=1024,
+        PADDED_TOPK=next_power_of_2(num_logprobs),
     )
     return logprobs
 
@@ -110,14 +125,16 @@ def compute_topk_logprobs(
     # the topk + 1 tokens.
     logprobs = compute_token_logprobs(logits, logprob_token_ids)
     token_ranks = torch.empty(batch_size, dtype=torch.int64, device=logits.device)
+    # _ranks_kernel is either the Triton JIT kernel or the PyTorch FuncWrapper.
     _ranks_kernel[(batch_size,)](
         token_ranks,
         logits,
         logits.stride(0),
         sampled_token_ids,
         vocab_size,
-        BLOCK_SIZE=8192,  # type: ignore
+        BLOCK_SIZE=8192,
     )
+
     return LogprobsTensors(
         logprob_token_ids=logprob_token_ids,
         logprobs=logprobs,
