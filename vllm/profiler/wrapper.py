@@ -682,6 +682,7 @@ class CudaProfilerWrapper(WorkerProfiler):
 
 _DEFAULT_TORCH_PROFILER_ACTIVITIES: dict[str, tuple[TorchProfilerActivity, ...]] = {
     "cpu": ("CPU",),
+    "privateuseone": ("CPU", "PrivateUse1"),
     "cuda": ("CPU", "CUDA"),
     "xpu": ("CPU", "XPU"),
 }
@@ -691,6 +692,7 @@ _SUPPORTED_TORCH_PROFILER_ACTIVITIES = {
 }
 _SUPPORTED_PROFILER_KINDS: dict[str, frozenset[ProfilerKind]] = {
     "cpu": frozenset(("torch",)),
+    "privateuseone": frozenset(("torch",)),
     "cuda": frozenset(("torch", "cuda", "proton")),
     "xpu": frozenset(("torch",)),
 }
