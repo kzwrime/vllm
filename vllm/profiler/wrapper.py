@@ -63,6 +63,9 @@ class WorkerProfiler(ABC):
         self._profiling_for_iters = 0
         self._running = False
 
+        # Callbacks invoked after the profiler stops (e.g. to dump EPLB stats).
+        self._stop_callbacks: list[Callable[[], None]] = []
+
     @property
     def is_running(self) -> bool:
         """Whether the underlying profiler is currently collecting data."""
@@ -99,6 +102,18 @@ class WorkerProfiler(ABC):
         except Exception as e:
             logger.warning("Failed to stop profiler: %s", e)
         self._running = False  # Always mark as not running, assume stop worked
+        for fn in self._stop_callbacks:
+            try:
+                fn()
+            except Exception as e:
+                logger.warning("Profiler stop callback failed: %s", e)
+
+    def add_stop_callback(self, fn: Callable[[], None]) -> None:
+        """Register a callback to be invoked after the profiler stops.
+
+        Callbacks run under the lifecycle lock and must not call start/stop.
+        """
+        self._stop_callbacks.append(fn)
 
     def start(
         self,
