@@ -136,6 +136,11 @@ class ProfilerConfig:
     """If `True`, enables memory profiling in the torch profiler.
     Disabled by default."""
 
+    torch_profiler_no_trace_file: bool = False
+    """If `True`, disables JSON trace file generation.
+    Text statistics are still generated when enabled. Disabled by default.
+    """
+
     capture_torch_profiler: bool = False
     """If `True`, enables a torch profiler during CUDA graph capture on rank 0.
     Traces are saved to a `capture_traces` subdirectory under `torch_profiler_dir`.

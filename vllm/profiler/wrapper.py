@@ -289,6 +289,13 @@ class TorchProfilerWrapper(WorkerProfiler):
                     profiler_config.active_iterations,
                 )
 
+        if profiler_config.torch_profiler_no_trace_file:
+
+            def on_trace_ready_wrapper(prof: torch.profiler.profile) -> None:
+                pass
+
+            trace_handler = on_trace_ready_wrapper
+
         self._profiler_kwargs = dict(
             activities=[TorchProfilerActivityMap[activity] for activity in activities],
             schedule=profiler_schedule,
@@ -318,7 +325,10 @@ class TorchProfilerWrapper(WorkerProfiler):
         if self._active:
             return
         self._worker_name = worker_name
-        if self._custom_trace_handler:
+        if (
+            self._custom_trace_handler
+            or self.profiler_config.torch_profiler_no_trace_file
+        ):
             return
         self._profiler_kwargs["on_trace_ready"] = (
             torch.profiler.tensorboard_trace_handler(
