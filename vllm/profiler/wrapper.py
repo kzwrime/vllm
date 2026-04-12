@@ -216,6 +216,14 @@ class TorchProfilerWrapper(WorkerProfiler):
                     profiler_config.active_iterations,
                 )
 
+        # Prepare on_trace_ready handler
+        if profiler_config.torch_profiler_no_trace_file:
+            # Use a no-op handler to avoid generating trace files
+            def on_trace_ready_wrapper(prof):
+                pass
+
+            trace_handler = on_trace_ready_wrapper
+
         self.profiler = torch.profiler.profile(
             activities=[TorchProfilerActivityMap[activity] for activity in activities],
             schedule=profiler_schedule,
