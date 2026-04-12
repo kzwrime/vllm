@@ -189,17 +189,29 @@ class TorchProfilerWrapper(WorkerProfiler):
             )
 
         self.dump_cpu_time_total = "CPU" in activities and len(activities) == 1
+
+        # Prepare on_trace_ready handler
+        if profiler_config.torch_profiler_no_trace_file:
+            # Use a no-op handler to avoid generating trace files
+            def on_trace_ready_wrapper(prof):
+                pass
+
+            on_trace_ready = on_trace_ready_wrapper
+        else:
+            # Use default tensorboard_trace_handler to generate trace files
+            on_trace_ready = torch.profiler.tensorboard_trace_handler(
+                torch_profiler_trace_dir,
+                worker_name=worker_name,
+                use_gzip=profiler_config.torch_profiler_use_gzip,
+            )
+
         self.profiler = torch.profiler.profile(
             activities=[TorchProfilerActivityMap[activity] for activity in activities],
             record_shapes=profiler_config.torch_profiler_record_shapes,
             profile_memory=profiler_config.torch_profiler_with_memory,
             with_stack=profiler_config.torch_profiler_with_stack,
             with_flops=profiler_config.torch_profiler_with_flops,
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                torch_profiler_trace_dir,
-                worker_name=worker_name,
-                use_gzip=profiler_config.torch_profiler_use_gzip,
-            ),
+            on_trace_ready=on_trace_ready,
         )
 
     @override

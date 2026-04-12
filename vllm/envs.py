@@ -102,6 +102,7 @@ if TYPE_CHECKING:
     VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL: str | None = None
     VLLM_PROFILER_DELAY_ITERS: str | None = None
     VLLM_PROFILER_MAX_ITERS: str | None = None
+    VLLM_TORCH_PROFILER_NO_TRACE_FILE: str | None = None
     # End of deprecated env variables for profiling
     VLLM_USE_AOT_COMPILE: bool = False
     VLLM_USE_BYTECODE_HOOK: bool = False
@@ -919,6 +920,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Deprecated, see profiler_config.
     "VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL": lambda: (
         os.getenv("VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL")
+    ),
+    # Control whether torch profiler generates trace files (.json.gz).
+    # Set to 1 to disable trace file generation, only txt/csv stats will be generated.
+    # Deprecated, see profiler_config.
+    "VLLM_TORCH_PROFILER_NO_TRACE_FILE": lambda: (
+        os.getenv("VLLM_TORCH_PROFILER_NO_TRACE_FILE")
     ),
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ": lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),

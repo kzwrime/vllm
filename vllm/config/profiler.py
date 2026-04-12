@@ -53,6 +53,11 @@ class ProfilerConfig:
     """If `True`, enables memory profiling in the torch profiler.
     Disabled by default."""
 
+    torch_profiler_no_trace_file: bool = False
+    """If `True`, disables trace file generation (.json.gz). 
+    Only txt/csv stats will be generated. Disabled by default.
+    """
+
     ignore_frontend: bool = False
     """If `True`, disables the front-end profiling of AsyncLLM when using the 
     'torch' profiler. This is needed to reduce overhead when using delay/limit options,
@@ -161,6 +166,10 @@ class ProfilerConfig:
                 self._set_from_env_if_set(
                     "torch_profiler_dump_cuda_time_total",
                     "VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL",
+                )
+                self._set_from_env_if_set(
+                    "torch_profiler_no_trace_file",
+                    "VLLM_TORCH_PROFILER_NO_TRACE_FILE",
                 )
 
         self._set_from_env_if_set(
