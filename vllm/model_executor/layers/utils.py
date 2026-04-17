@@ -95,6 +95,10 @@ def default_unquantized_gemm(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ):
+    if envs.VLLM_USE_XCPU_LINEAR:
+        import torch_xcpu
+
+        return torch_xcpu.ops.linear(x, weight, bias)
     return torch.nn.functional.linear(x, weight, bias)
 
 
@@ -230,6 +234,15 @@ def dispatch_cpu_unquantized_gemm(
 
     N, K = layer.weight.size()
     dtype = layer.weight.dtype
+
+    if envs.VLLM_USE_XCPU_LINEAR:
+        import torch_xcpu
+
+        # has_bias = getattr(layer, "bias", None) is not None
+        layer.cpu_linear = lambda x, weight, bias: torch_xcpu.ops.linear(
+            x, weight, bias
+        )
+        return
 
     # Zen CPU path: zentorch_linear_unary with optional eager weight prepacking.
     if current_platform.is_zen_cpu() and hasattr(
