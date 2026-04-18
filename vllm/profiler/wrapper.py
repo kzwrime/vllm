@@ -172,6 +172,7 @@ class TorchProfilerWrapper(WorkerProfiler):
     ) -> None:
         super().__init__(profiler_config)
 
+        self.worker_name = worker_name
         self.local_rank = local_rank
         self.profiler_config = profiler_config
         torch_profiler_trace_dir = profiler_config.torch_profiler_dir
@@ -272,7 +273,9 @@ class TorchProfilerWrapper(WorkerProfiler):
             ts = datetime.timestamp(datetime.now())
 
             profiler_dir = profiler_config.torch_profiler_dir
-            profiler_out_file = f"{profiler_dir}/profiler_out_{rank}_{ts}.txt"
+            profiler_out_file = (
+                f"{profiler_dir}/{self.worker_name}-{ts}-profiler_out.txt"
+            )
             sort_key = "self_cpu_time_total"
             table = self.profiler.key_averages().table(sort_by=sort_key)
 
@@ -280,7 +283,9 @@ class TorchProfilerWrapper(WorkerProfiler):
                 print(table, file=f)
 
             key_averages_events = self.profiler.key_averages()
-            profiler_csv_file = f"{profiler_dir}/profiler_out_{rank}_{ts}.csv"
+            profiler_csv_file = (
+                f"{profiler_dir}/{self.worker_name}-{ts}-profiler_out.csv"
+            )
             headers = list(vars(key_averages_events[0]).keys())
 
             with open(profiler_csv_file, "w", newline="") as csvfile:
