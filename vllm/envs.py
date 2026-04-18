@@ -141,6 +141,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
     VLLM_ENABLE_MOE_DP_CHUNK: bool = True
+    VLLM_ENABLE_SEQUENCE_PARALLEL_MOE: bool = True
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
     VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY: str = ""
@@ -1114,6 +1115,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MOE_DP_CHUNK_SIZE": lambda: int(os.getenv("VLLM_MOE_DP_CHUNK_SIZE", "256")),
     "VLLM_ENABLE_MOE_DP_CHUNK": lambda: bool(
         int(os.getenv("VLLM_ENABLE_MOE_DP_CHUNK", "1"))
+    ),
+    # Whether to enable sequence parallel for MoE models.
+    # Setting to "0" disables sequence parallel for MoE.
+    "VLLM_ENABLE_SEQUENCE_PARALLEL_MOE": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_SEQUENCE_PARALLEL_MOE", "1"))
     ),
     # Randomize inputs during dummy runs when using Data Parallel
     "VLLM_RANDOMIZE_DP_DUMMY_INPUTS": lambda: os.environ.get(

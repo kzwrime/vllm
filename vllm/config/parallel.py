@@ -534,6 +534,9 @@ class ParallelConfig:
     #
     @property
     def use_sequence_parallel_moe(self) -> bool:
+        # Check environment variable first - allow forcing disable
+        if not envs.VLLM_ENABLE_SEQUENCE_PARALLEL_MOE:
+            return False
         return (
             self.all2all_backend
             in (
