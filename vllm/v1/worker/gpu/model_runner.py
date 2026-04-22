@@ -948,6 +948,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs=num_reqs,
             )
 
+        if skip_attn_for_dummy_run:
+            skip_compiled = True
         if self.dp_size > 1:
             batch_desc, num_tokens_across_dp = sync_cudagraph_and_dp_padding(
                 self.cudagraph_manager,
