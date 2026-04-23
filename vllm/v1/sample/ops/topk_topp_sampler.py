@@ -19,6 +19,17 @@ if HAS_TRITON:
 logger = init_logger(__name__)
 
 
+def _apply_top_k_top_p_xcpu(
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    allow_cpu_sync: bool = False,
+) -> torch.Tensor:
+    import torch_xcpu
+
+    return torch_xcpu.ops.apply_top_k_top_p(logits, k, p, allow_cpu_sync=allow_cpu_sync)
+
+
 class TopKTopPSampler(nn.Module):
     """
     Module that performs optional top-k and top-p filtering followed by
@@ -268,6 +279,9 @@ def apply_top_k_top_p_pytorch(
 
     The logits tensor may be updated in-place.
     """
+    if envs.VLLM_USE_XCPU_TOPK_TOPP_SAMPLER:
+        return _apply_top_k_top_p_xcpu(logits, k, p, allow_cpu_sync=allow_cpu_sync)
+
     # Ensure k and p are on the same device as logits
     if k is not None and k.device != logits.device:
         k = k.to(logits.device)
