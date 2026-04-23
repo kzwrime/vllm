@@ -193,8 +193,10 @@ def _gumbel_sample_kernel_impl(
     processed_logits_out: torch.Tensor | None = None,
     apply_temperature: bool = False,
 ) -> torch.Tensor:
-    return torch.ops.mcpu.vllm_gumbel_sample(
+    sampled_out = torch.empty(logits.shape[0], dtype=torch.int64, device=logits.device)
+    torch.ops.mcpu.vllm_gumbel_sample(
         logits,
+        sampled_out,
         expanded_idx_mapping,
         temperature,
         seed,
@@ -203,6 +205,7 @@ def _gumbel_sample_kernel_impl(
         processed_logits_out,
         apply_temperature,
     )
+    return sampled_out
 
 
 _gumbel_sample_kernel = _FuncWrapper(_gumbel_sample_kernel_impl)
@@ -431,7 +434,8 @@ def combine_sampled_and_draft_tokens(
     cu_num_logits: torch.Tensor,
     num_logits: int,
 ) -> torch.Tensor:
-    return torch.ops.mcpu.vllm_combine_sampled_and_draft_tokens(
+    logits_indices = torch.empty(num_logits, dtype=torch.int64, device=input_ids.device)
+    torch.ops.mcpu.vllm_combine_sampled_and_draft_tokens(
         input_ids,
         idx_mapping,
         last_sampled_tokens,
@@ -441,7 +445,9 @@ def combine_sampled_and_draft_tokens(
         draft_tokens,
         cu_num_logits,
         num_logits,
+        logits_indices,
     )
+    return logits_indices
 
 
 def get_num_sampled_and_rejected(
@@ -451,13 +457,16 @@ def get_num_sampled_and_rejected(
     idx_mapping: torch.Tensor,
     prefill_len: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.ops.mcpu.vllm_get_num_sampled_and_rejected(
+    num_rejected = torch.empty_like(num_sampled)
+    torch.ops.mcpu.vllm_get_num_sampled_and_rejected(
         num_sampled,
+        num_rejected,
         seq_lens,
         cu_num_logits,
         idx_mapping,
         prefill_len,
     )
+    return num_sampled, num_rejected
 
 
 def expand_idx_mapping(
@@ -466,12 +475,19 @@ def expand_idx_mapping(
     cu_num_logits: torch.Tensor,
     max_expand_len: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.ops.mcpu.vllm_expand_idx_mapping(
+    expanded_idx_mapping = idx_mapping.new_empty(total_num_logits)
+    expanded_local_pos = torch.empty(
+        total_num_logits, dtype=torch.int32, device=idx_mapping.device
+    )
+    torch.ops.mcpu.vllm_expand_idx_mapping(
         idx_mapping,
+        expanded_idx_mapping,
+        expanded_local_pos,
         total_num_logits,
         cu_num_logits,
         max_expand_len,
     )
+    return expanded_idx_mapping, expanded_local_pos
 
 
 # =============================================================================
