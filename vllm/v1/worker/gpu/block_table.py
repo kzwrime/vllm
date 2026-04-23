@@ -9,6 +9,11 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
+try:
+    _HAS_MCPU_BLOCK_TABLE_OPS = hasattr(torch.ops.mcpu, "vllm_gather_block_tables")
+except (AttributeError, RuntimeError):
+    _HAS_MCPU_BLOCK_TABLE_OPS = False
+
 
 class BlockTables:
     def __init__(
@@ -109,6 +114,15 @@ class BlockTables:
         num_reqs_padded: int,
     ) -> tuple[torch.Tensor, ...]:
         num_reqs = idx_mapping.shape[0]
+        if self.device.type == "mcpu" and _HAS_MCPU_BLOCK_TABLE_OPS:
+            torch.ops.mcpu.vllm_gather_block_tables(
+                idx_mapping,
+                [block_table.gpu for block_table in self.block_tables],
+                self.num_blocks.gpu,
+                num_reqs_padded,
+                self.input_block_tables,
+            )
+            return tuple(bt[:num_reqs_padded] for bt in self.input_block_tables)
         if not HAS_TRITON:
             # Pure-PyTorch fallback: copy block table rows by request index.
             for group_id in range(self.num_kv_cache_groups):
@@ -151,6 +165,20 @@ class BlockTables:
         num_tokens_padded: int,
     ) -> torch.Tensor:
         num_reqs = idx_mapping.shape[0]
+        if self.device.type == "mcpu" and _HAS_MCPU_BLOCK_TABLE_OPS:
+            torch.ops.mcpu.vllm_compute_slot_mappings(
+                idx_mapping,
+                query_start_loc,
+                positions,
+                [block_table.gpu for block_table in self.block_tables],
+                self.block_sizes_tensor,
+                self.slot_mappings,
+                self.cp_size,
+                self.cp_rank,
+                self.cp_interleave,
+                PAD_SLOT_ID,
+            )
+            return self.slot_mappings[:, :num_tokens_padded]
         if not HAS_TRITON:
             # Pure-PyTorch fallback: compute slot IDs from block tables.
             cp_size = self.cp_size
