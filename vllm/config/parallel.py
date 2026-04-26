@@ -83,6 +83,25 @@ class EPLBConfig:
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
 
+    statistics_only: bool = False
+    """
+    When enabled, EPLB only collects and logs load statistics without
+    rearranging expert weights at ``step_interval``.
+    """
+
+    statistics_detailed: bool = False
+    """
+    When enabled together with ``statistics_only``, emit a detailed per-layer
+    expert load table in addition to the summary balancedness log.
+    """
+
+    rebalance_after_profiler_stop: bool = False
+    """
+    When enabled, a profiler-stop callback requests a forced EPLB rearrangement
+    on the next engine step. This overrides ``statistics_only`` for that one
+    rearrangement so a follow-up run can use the new mapping.
+    """
+
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
         if self.use_async and self.policy != "default":
@@ -363,10 +382,13 @@ class ParallelConfig:
             )
 
         if self.enable_eplb:
-            if not current_platform.is_cuda_alike():
+            if not (
+                current_platform.is_cuda_alike() or current_platform.is_out_of_tree()
+            ):
                 raise ValueError(
                     "Expert parallelism load balancing is only supported on "
-                    "CUDA devices or ROCm devices now."
+                    "CUDA devices, ROCm devices, or supported out-of-tree "
+                    "accelerator backends."
                 )
             if not self.enable_expert_parallel:
                 raise ValueError("enable_expert_parallel must be True to use EPLB.")

@@ -11,7 +11,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
 )
 from vllm.platforms import current_platform
 
-if current_platform.is_cuda_alike():
+if current_platform.is_cuda_alike() or current_platform.is_out_of_tree():
 
     @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
     def eplb_map_to_physical_and_record(

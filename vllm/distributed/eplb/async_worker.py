@@ -159,6 +159,7 @@ async def transfer_run_periodically(
                             ep_group=eplb_group,
                             is_profile=is_profile,
                             cuda_stream=cuda_stream,
+                            layer_idx=layer_idx,
                         )
                         # block the async thread until the transfer to
                         # the intermediate buffer is complete.

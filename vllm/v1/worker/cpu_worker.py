@@ -52,6 +52,14 @@ class CPUWorker(Worker):
                 activities=["CPU"],
             )
 
+            def _eplb_on_profiler_stop() -> None:
+                eplb = getattr(getattr(self, "model_runner", None), "eplb_state", None)
+                if eplb is not None:
+                    logger.info("Profiler stopped, dumping EPLB statistics window.")
+                    eplb.log_all_statistics(is_profiler_stop=True)
+
+            self.profiler.add_stop_callback(_eplb_on_profiler_stop)
+
     def init_device(self):
         # Check whether critical libraries are loaded
         def check_preloaded_libs(name: str):

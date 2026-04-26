@@ -42,6 +42,7 @@ class WorkerProfiler(ABC):
         # Track when the profiler is actually running
         self._profiling_for_iters = 0
         self._running = False
+        self._stop_callbacks: list[Callable[[], None]] = []
 
     @abstractmethod
     def _start(self) -> None:
@@ -61,6 +62,10 @@ class WorkerProfiler(ABC):
         except Exception as e:
             logger.warning("Failed to start profiler: %s", e)
 
+    def add_stop_callback(self, fn: Callable[[], None]) -> None:
+        """Register a callback invoked after the profiler stops."""
+        self._stop_callbacks.append(fn)
+
     def _call_stop(self) -> None:
         """Call _stop with error handling but no safeguards."""
         try:
@@ -69,6 +74,11 @@ class WorkerProfiler(ABC):
         except Exception as e:
             logger.warning("Failed to stop profiler: %s", e)
         self._running = False  # Always mark as not running, assume stop worked
+        for fn in self._stop_callbacks:
+            try:
+                fn()
+            except Exception as e:
+                logger.warning("Profiler stop callback failed: %s", e)
 
     def start(self) -> None:
         """Attempt to start the profiler, accounting for delayed starts."""

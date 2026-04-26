@@ -296,6 +296,11 @@ class EplbState:
         newly started EP ranks may not have physical experts
         mapped yet.
         """
+        self._force_rearrange_pending: bool = False
+        """
+        Request a one-shot immediate rearrangement on the next step().
+        This is typically set by the profiler-stop callback.
+        """
         if self.device.type == "cuda":
             self.cuda_device_index = self.device.index
             if self.cuda_device_index is None and torch.cuda.is_available():
@@ -579,6 +584,11 @@ class EplbState:
                         self.expert_rearrangement_step_interval
                         - self.expert_rearrangement_step,
                     )
+                    if (
+                        self.parallel_config.eplb_config.statistics_only
+                        and self.parallel_config.eplb_config.statistics_detailed
+                    ):
+                        self._log_detailed_expert_statistics(eplb_model_state)
 
         # Update the expert load sliding window
         if not is_dummy:
@@ -612,12 +622,28 @@ class EplbState:
                         is_profile=is_profile,
                     )
 
+        if self._sync_force_rearrange_flag():
+            self._force_rearrange_pending = False
+            self.expert_rearrangement_step = 0
+            if ep_group.rank() == 0:
+                logger.info("EPLB: executing forced rearrangement after profiler stop.")
+            self.rearrange()
+            return
+
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
             if self.is_async and any(
                 eplb_model_state.rebalanced
                 for eplb_model_state in self.model_states.values()
             ):
                 # Still performing asynchronous rearrangement
+                return
+            if self.parallel_config.eplb_config.statistics_only:
+                if ep_group.rank() == 0:
+                    logger.info(
+                        "EPLB statistics-only mode: skipping rearrangement at step %d.",
+                        self.expert_rearrangement_step,
+                    )
+                self.expert_rearrangement_step = 0
                 return
             self.expert_rearrangement_step = 0
             self.rearrange()
@@ -737,6 +763,7 @@ class EplbState:
                     ep_group,
                     is_profile,
                     rank_mapping,
+                    round_id=self.expert_rearrangement_step,
                 )
 
                 if not is_profile:
@@ -941,6 +968,163 @@ class EplbState:
         for eplb_model_state in self.model_states.values():
             load_pass_list.append(eplb_model_state.expert_load_pass.clone())
         return self._allreduce_list(load_pass_list)
+
+    def _sync_force_rearrange_flag(self) -> bool:
+        """
+        Synchronize the one-shot force-rearrange flag across EP ranks.
+
+        This intentionally uses a dedicated scalar all-reduce when the feature
+        is enabled, instead of coupling correctness to the balancedness logging
+        path. The overhead is negligible and the behavior is independent of
+        ``log_balancedness_interval``.
+        """
+        if not self.parallel_config.eplb_config.rebalance_after_profiler_stop:
+            return False
+
+        parallel_state = get_ep_group()
+        cpu_group = getattr(parallel_state, "cpu_group", None)
+        if cpu_group is not None and cpu_group.size() > 1:
+            flag = torch.tensor(
+                [int(self._force_rearrange_pending)],
+                dtype=torch.int32,
+                device="cpu",
+            )
+            all_reduce(flag, group=cpu_group)
+            return bool(flag.item())
+
+        device_group = parallel_state.device_group
+        if device_group.size() <= 1:
+            return self._force_rearrange_pending
+
+        device = getattr(parallel_state, "device", self.device)
+        flag = torch.tensor(
+            [int(self._force_rearrange_pending)],
+            dtype=torch.int32,
+            device=device,
+        )
+        all_reduce(flag, group=device_group)
+        return bool(flag.item())
+
+    def log_all_statistics(self, is_profiler_stop: bool = False) -> None:
+        """Dump current EPLB statistics for all managed MoE models."""
+        if (
+            is_profiler_stop
+            and self.parallel_config.eplb_config.rebalance_after_profiler_stop
+        ):
+            self._force_rearrange_pending = True
+
+        ep_group = get_ep_group().device_group
+        if ep_group.rank() != 0:
+            return
+
+        if is_profiler_stop:
+            logger.info("EPLB statistics dump triggered by profiler stop.")
+            if self.parallel_config.eplb_config.rebalance_after_profiler_stop:
+                logger.info(
+                    "EPLB will request one forced rearrangement on the next step."
+                )
+
+        for eplb_model_state in self.model_states.values():
+            self._log_detailed_expert_statistics(eplb_model_state)
+
+    def _log_detailed_expert_statistics(
+        self,
+        eplb_model_state: EplbModelState,
+    ) -> None:
+        """Log a compact per-layer view of expert load over the current window."""
+        window_data = eplb_model_state.expert_load_window
+        num_moe_layers = eplb_model_state.model.num_moe_layers
+        num_physical_experts = eplb_model_state.model.num_physical_experts
+        physical_to_logical_map = eplb_model_state.physical_to_logical_map
+        layer_expert_total = window_data.sum(dim=0).long()
+
+        logger.info("=" * 80)
+        logger.info("[EPLB Statistics] model=%s", eplb_model_state.model_name)
+        logger.info(
+            "layers=%d physical_experts=%d window_size=%d window_step=%d",
+            num_moe_layers,
+            num_physical_experts,
+            self.expert_load_window_size,
+            self.expert_load_window_step,
+        )
+        logger.info("-" * 80)
+
+        def _replicas(layer_map: torch.Tensor) -> dict[int, int]:
+            replicas: dict[int, int] = {}
+            for phys_idx in range(num_physical_experts):
+                logical_idx = int(layer_map[phys_idx].item())
+                replicas[logical_idx] = replicas.get(logical_idx, 0) + 1
+            return replicas
+
+        def _fmt(entry: tuple[int, int] | None, replicas: dict[int, int]) -> str:
+            if entry is None:
+                return "-"
+            expert_id, tokens = entry
+            return f"E{expert_id:03d}({tokens:6d}/{replicas.get(expert_id, 0)}r)"
+
+        def _pick(
+            sorted_items: list[tuple[int, int]],
+            index: int,
+            replicas: dict[int, int],
+        ) -> str:
+            if 0 <= index < len(sorted_items):
+                return _fmt(sorted_items[index], replicas)
+            return "-"
+
+        header = (
+            f"{'Layer':<6}{'Total':<12}{'Balance':<12}"
+            f"{'Top1':<18}{'Top2':<18}{'Top3':<18}"
+            f"{'Mid':<18}{'Bot2':<18}{'Bot1':<18}"
+        )
+        logger.info("%s", header)
+        logger.info("%s", "-" * len(header))
+
+        balances: list[float] = []
+        for layer_idx in range(num_moe_layers):
+            phys_totals = layer_expert_total[layer_idx]
+            layer_map = physical_to_logical_map[layer_idx]
+            logical_totals: dict[int, int] = {}
+            replicas = _replicas(layer_map)
+
+            for phys_idx in range(num_physical_experts):
+                logical_idx = int(layer_map[phys_idx].item())
+                logical_totals[logical_idx] = logical_totals.get(logical_idx, 0) + int(
+                    phys_totals[phys_idx].item()
+                )
+
+            if not logical_totals:
+                continue
+
+            layer_total = sum(logical_totals.values())
+            sorted_items = sorted(
+                logical_totals.items(), key=lambda item: item[1], reverse=True
+            )
+            avg_tokens = layer_total / len(sorted_items)
+            max_tokens = sorted_items[0][1]
+            balance = avg_tokens / max_tokens if max_tokens > 0 else 0.0
+            balances.append(balance)
+            mid = len(sorted_items) // 2
+
+            logger.info(
+                "%-6d%-12d%-12.4f%-18s%-18s%-18s%-18s%-18s%-18s",
+                layer_idx,
+                layer_total,
+                balance,
+                _pick(sorted_items, 0, replicas),
+                _pick(sorted_items, 1, replicas),
+                _pick(sorted_items, 2, replicas),
+                _pick(sorted_items, mid, replicas),
+                _pick(sorted_items, len(sorted_items) - 2, replicas),
+                _pick(sorted_items, len(sorted_items) - 1, replicas),
+            )
+
+        if balances:
+            logger.info("-" * 80)
+            logger.info(
+                "average per-layer balancedness over window: %.4f",
+                sum(balances) / len(balances),
+            )
+        logger.info("=" * 80)
 
     @classmethod
     def from_mapping(

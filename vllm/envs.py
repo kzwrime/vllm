@@ -246,6 +246,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_USE_XCPU_LINEAR: bool = False
     VLLM_DISABLE_TQDM_AND_MONITOR: bool = False
+    VLLM_EPLB_COMM_BACKEND: str = "torch"
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
@@ -1654,6 +1655,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_TQDM_AND_MONITOR": lambda: bool(
         int(os.getenv("VLLM_DISABLE_TQDM_AND_MONITOR", "0"))
     ),
+    "VLLM_EPLB_COMM_BACKEND": lambda: os.getenv("VLLM_EPLB_COMM_BACKEND", "torch"),
     # Disable using pytorch's pin memory for CPU offloading.
     "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY", "0"))
