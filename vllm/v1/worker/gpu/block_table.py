@@ -9,11 +9,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 
-try:
-    _HAS_MCPU_BLOCK_TABLE_OPS = hasattr(torch.ops.mcpu, "vllm_gather_block_tables")
-except (AttributeError, RuntimeError):
-    _HAS_MCPU_BLOCK_TABLE_OPS = False
-
 
 class BlockTables:
     def __init__(
@@ -114,7 +109,7 @@ class BlockTables:
         num_reqs_padded: int,
     ) -> tuple[torch.Tensor, ...]:
         num_reqs = idx_mapping.shape[0]
-        if self.device.type == "mcpu" and _HAS_MCPU_BLOCK_TABLE_OPS:
+        if self.device.type == "mcpu":
             torch.ops.mcpu.vllm_gather_block_tables(
                 idx_mapping,
                 [block_table.gpu for block_table in self.block_tables],
@@ -165,7 +160,7 @@ class BlockTables:
         num_tokens_padded: int,
     ) -> torch.Tensor:
         num_reqs = idx_mapping.shape[0]
-        if self.device.type == "mcpu" and _HAS_MCPU_BLOCK_TABLE_OPS:
+        if self.device.type == "mcpu":
             torch.ops.mcpu.vllm_compute_slot_mappings(
                 idx_mapping,
                 query_start_loc,

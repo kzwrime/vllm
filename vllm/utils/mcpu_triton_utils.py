@@ -4,14 +4,10 @@
 """
 mcpu C++ implementations of Triton kernels used in the GPU model runner.
 
-This module is loaded by the mcpu backend (torch_mcpu) to override the
-pure-PyTorch fallbacks in torch_triton_utils.  Each function delegates to
+This module provides mcpu C++ replacements for the pure-PyTorch fallbacks in
+torch_triton_utils. Each function delegates to
 a C++ operator registered under torch.ops.mcpu.vllm_* (implemented in
 torch_mcpu/csrc/aten/vllm_kernels/).
-
-Injection: torch_mcpu/__init__.py calls patch_torch_triton_utils() so that
-every importer of vllm.utils.torch_triton_utils gets the mcpu implementations
-without any changes to the vllm source tree.
 """
 
 from __future__ import annotations
@@ -498,8 +494,8 @@ def expand_idx_mapping(
 def patch_torch_triton_utils() -> None:
     """Replace vllm.utils.torch_triton_utils with this module.
 
-    Called once by torch_mcpu during backend initialisation so that all
-    vllm code that imports from torch_triton_utils gets mcpu implementations
-    without touching any vllm source files.
+    Kept as a compatibility helper for environments that still want global
+    module replacement. The preferred path is to select implementations via
+    VLLM_TRITON_UTILS_SELECT in vLLM's fallback call sites.
     """
     sys.modules["vllm.utils.torch_triton_utils"] = sys.modules[__name__]

@@ -7,6 +7,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.utils.triton_fallback_selector import resolve_fallback_kernel
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -189,12 +190,6 @@ def _penalties_kernel(
     tl.store(logits_ptr + token_idx * logits_stride + block, logits, mask=mask)
 
 
-if not HAS_TRITON:
-    # Shadow the Triton JIT function above with the pure-PyTorch FuncWrapper.
-    # Mirrors vllm/utils/torch_triton_utils.py::_penalties_kernel_impl.
-    from vllm.utils.torch_triton_utils import _penalties_kernel  # noqa: F811
-
-
 def apply_penalties(
     logits: torch.Tensor,
     expanded_idx_mapping: torch.Tensor,
@@ -282,12 +277,6 @@ def _bincount_kernel(
         )
 
 
-if not HAS_TRITON:
-    # Shadow the Triton JIT function above with the pure-PyTorch FuncWrapper.
-    # Mirrors vllm/utils/torch_triton_utils.py::_bincount_kernel_impl.
-    from vllm.utils.torch_triton_utils import _bincount_kernel  # noqa: F811
-
-
 def bincount(
     expanded_idx_mapping: torch.Tensor,
     all_token_ids: torch.Tensor,
@@ -322,4 +311,15 @@ def use_penalty(sampling_params: SamplingParams) -> bool:
         sampling_params.repetition_penalty != 1.0
         or sampling_params.frequency_penalty != 0.0
         or sampling_params.presence_penalty != 0.0
+    )
+
+
+if not HAS_TRITON:
+    _penalties_kernel = resolve_fallback_kernel(
+        _penalties_kernel,
+        "_penalties_kernel",
+    )
+    _bincount_kernel = resolve_fallback_kernel(
+        _bincount_kernel,
+        "_bincount_kernel",
     )

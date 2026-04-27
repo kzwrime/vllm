@@ -5,6 +5,7 @@ import torch
 
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.utils.triton_fallback_selector import resolve_fallback_kernel
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -163,8 +164,10 @@ def _bad_words_kernel(
 
 
 if not HAS_TRITON:
-    # Mirrors vllm/utils/torch_triton_utils.py::_bad_words_kernel_impl.
-    from vllm.utils.torch_triton_utils import _bad_words_kernel  # noqa: F811
+    _bad_words_kernel = resolve_fallback_kernel(
+        _bad_words_kernel,
+        "_bad_words_kernel",
+    )
 
 
 def apply_bad_words(

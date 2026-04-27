@@ -5,6 +5,7 @@ import torch
 
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.triton_fallback_selector import resolve_fallback_kernel
 from vllm.v1.outputs import LogprobsTensors
 
 
@@ -50,12 +51,6 @@ def _topk_log_softmax_kernel(
     tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
 
 
-if not HAS_TRITON:
-    # Shadow the Triton JIT function above with the pure-PyTorch FuncWrapper.
-    # Mirrors vllm/utils/torch_triton_utils.py::_topk_log_softmax_kernel_impl.
-    from vllm.utils.torch_triton_utils import _topk_log_softmax_kernel  # noqa: F811
-
-
 @triton.jit
 def _ranks_kernel(
     output_ptr,
@@ -77,12 +72,6 @@ def _ranks_kernel(
         logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
         n += tl.sum((logits >= x).to(tl.int32))
     tl.store(output_ptr + req_idx, n)
-
-
-if not HAS_TRITON:
-    # Shadow the Triton JIT function above with the pure-PyTorch FuncWrapper.
-    # Mirrors vllm/utils/torch_triton_utils.py::_ranks_kernel_impl.
-    from vllm.utils.torch_triton_utils import _ranks_kernel  # noqa: F811
 
 
 def compute_token_logprobs(
@@ -140,4 +129,15 @@ def compute_topk_logprobs(
         logprobs=logprobs,
         selected_token_ranks=token_ranks,
         cu_num_generated_tokens=cu_num_logits,
+    )
+
+
+if not HAS_TRITON:
+    _topk_log_softmax_kernel = resolve_fallback_kernel(
+        _topk_log_softmax_kernel,
+        "_topk_log_softmax_kernel",
+    )
+    _ranks_kernel = resolve_fallback_kernel(
+        _ranks_kernel,
+        "_ranks_kernel",
     )

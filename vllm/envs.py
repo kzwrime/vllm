@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool | None = None
+    VLLM_TRITON_UTILS_SELECT: Literal["MCPU", "TORCH"] = "MCPU"
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
@@ -710,6 +711,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     )
     if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ
     else None,
+    # Select the fallback implementation used by vLLM when Triton is not
+    # available.
+    "VLLM_TRITON_UTILS_SELECT": env_with_choices(
+        "VLLM_TRITON_UTILS_SELECT",
+        "MCPU",
+        ["MCPU", "TORCH"],
+        case_sensitive=False,
+    ),
     # If set, vllm will use torch_xcpu top-k/top-p sampler implementation.
     "VLLM_USE_XCPU_TOPK_TOPP_SAMPLER": lambda: bool(
         int(os.environ.get("VLLM_USE_XCPU_TOPK_TOPP_SAMPLER", "0"))

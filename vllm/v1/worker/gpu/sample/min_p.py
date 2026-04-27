@@ -3,6 +3,7 @@
 import torch
 
 from vllm.triton_utils import HAS_TRITON, tl, triton
+from vllm.utils.triton_fallback_selector import resolve_fallback_kernel
 
 
 @triton.jit
@@ -45,11 +46,6 @@ def _min_p_kernel(
         tl.store(logits_ptr + token_idx * logits_stride + block, logits, mask=mask)
 
 
-if not HAS_TRITON:
-    # Mirrors vllm/utils/torch_triton_utils.py::_min_p_kernel_impl.
-    from vllm.utils.torch_triton_utils import _min_p_kernel  # noqa: F811
-
-
 def apply_min_p(
     logits: torch.Tensor, expanded_idx_mapping: torch.Tensor, min_p: torch.Tensor
 ) -> None:
@@ -62,4 +58,11 @@ def apply_min_p(
         min_p,
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
+    )
+
+
+if not HAS_TRITON:
+    _min_p_kernel = resolve_fallback_kernel(
+        _min_p_kernel,
+        "_min_p_kernel",
     )
