@@ -89,12 +89,15 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             self.max_position_embeddings,
         )
         # Get n-d rotational scaling corrected for extrapolation
-        inv_freq_mask = (
-            1
-            - yarn_linear_ramp_mask(low, high, self.rotary_dim // 2, dtype=torch.float)
-        ) * self.extrapolation_factor
+        ramp_mask = yarn_linear_ramp_mask(
+            low, high, self.rotary_dim // 2, dtype=torch.float
+        )
+        # Avoid Python scalar rsub under PrivateUse1 default-device contexts.
+        inv_freq_mask = (torch.ones_like(ramp_mask) - ramp_mask) * (
+            self.extrapolation_factor
+        )
         inv_freq = (
-            inv_freq_interpolation * (1 - inv_freq_mask)
+            inv_freq_interpolation * (torch.ones_like(inv_freq_mask) - inv_freq_mask)
             + inv_freq_extrapolation * inv_freq_mask
         )
         return inv_freq
