@@ -576,7 +576,12 @@ class Worker(WorkerBase):
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
-            self.model_runner._dummy_run(size, skip_eplb=True, remove_lora=False)
+            self.model_runner._dummy_run(
+                size,
+                skip_eplb=True,
+                remove_lora=False,
+                force_attention=True,
+            )
         self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
 
         # Warmup and tune the kernels used during model execution before
@@ -679,6 +684,7 @@ class Worker(WorkerBase):
                 num_tokens=max_num_reqs,
                 skip_eplb=True,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                force_attention=True,
             )
             if self.model_runner.is_pooling_model:
                 self.model_runner._dummy_pooler_run(hidden_states)
@@ -888,7 +894,11 @@ class Worker(WorkerBase):
 
     def execute_dummy_batch(self) -> None:
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
-        self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+        self.model_runner._dummy_run(
+            num_tokens,
+            uniform_decode=True,
+            skip_attn_for_dummy_run=True,
+        )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

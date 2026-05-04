@@ -3835,7 +3835,7 @@ class GPUModelRunner(
                     # returns True. before returning early here we call
                     # dummy run to ensure coordinate_batch_across_dp
                     # is called into to avoid out of sync issues.
-                    self._dummy_run(1)
+                    self._dummy_run(1, skip_attn_for_dummy_run=True)
                 if not has_kv_transfer_group():
                     # Return empty ModelRunnerOutput if no work to do.
                     return EMPTY_MODEL_RUNNER_OUTPUT
@@ -5205,6 +5205,7 @@ class GPUModelRunner(
         is_graph_capturing: bool = False,
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
+        skip_attn_for_dummy_run: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -5227,6 +5228,8 @@ class GPUModelRunner(
             create_mixed_batch: If True, create a mixed batch with both decode
                 (1 token) and prefill (multiple tokens) requests.
             remove_lora: If False, dummy LoRAs are not destroyed after the run
+            skip_attn_for_dummy_run: If True, skip attention metadata for the
+                dummy run and bypass the compiled model path.
             num_active_loras: Number of distinct active LoRAs to capture for.
                 LoRA is activated when num_active_loras > 0.
             profile_seq_lens: If provided, use this value for seq_lens instead
@@ -5361,7 +5364,9 @@ class GPUModelRunner(
         with self.synchronize_input_prep():
             # If force_attention is True, we always capture attention.
             # Otherwise, it only happens for cudagraph_runtime_mode=FULL.
-            if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            if not skip_attn_for_dummy_run and (
+                force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL
+            ):
                 if profile_seq_lens is not None:
                     seq_lens = profile_seq_lens  # type: ignore[assignment]
                 elif create_mixed_batch:
@@ -5469,6 +5474,7 @@ class GPUModelRunner(
                     batch_descriptor=batch_desc,
                     ubatch_slices=ubatch_slices_padded,
                     slot_mapping=slot_mappings,
+                    skip_compiled=skip_attn_for_dummy_run,
                 ),
             ):
                 outputs = self.model(
@@ -5780,7 +5786,9 @@ class GPUModelRunner(
 
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(
-            self.max_num_tokens, is_profile=True
+            self.max_num_tokens,
+            is_profile=True,
+            skip_attn_for_dummy_run=True,
         )
         if get_pp_group().is_last_rank:
             if self.is_pooling_model:
@@ -6072,6 +6080,7 @@ class GPUModelRunner(
                 skip_eplb=True,
                 remove_lora=False,
                 num_active_loras=desc.num_active_loras,
+                skip_attn_for_dummy_run=not force_attention,
             )
         self._dummy_run(
             desc.num_tokens,
