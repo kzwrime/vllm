@@ -488,8 +488,8 @@ class Qwen3_VisionTransformer(nn.Module):
             h_ceil = torch.clamp(h_floor + 1, max=num_grid_per_side - 1)
             w_ceil = torch.clamp(w_floor + 1, max=num_grid_per_side - 1)
 
-            dh = h_idxs - h_floor
-            dw = w_idxs - w_floor
+            dh = h_idxs - h_floor.to(dtype=h_idxs.dtype)
+            dw = w_idxs - w_floor.to(dtype=w_idxs.dtype)
 
             # Create meshgrid view for all h, w vars
             dh_grid, dw_grid = torch.meshgrid(dh, dw, indexing="ij")
@@ -506,7 +506,7 @@ class Qwen3_VisionTransformer(nn.Module):
             w11 = dh_grid * dw_grid
             w10 = dh_grid - w11
             w01 = dw_grid - w11
-            w00 = 1 - dh_grid - w01
+            w00 = torch.ones_like(dh_grid) - dh_grid - w01
 
             h_grid = torch.stack([h_floor_grid, h_floor_grid, h_ceil_grid, h_ceil_grid])
             w_grid = torch.stack([w_floor_grid, w_ceil_grid, w_floor_grid, w_ceil_grid])
