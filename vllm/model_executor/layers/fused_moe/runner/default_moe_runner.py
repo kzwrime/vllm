@@ -247,7 +247,11 @@ class DefaultMoERunner(MoERunner):
         self.moe_forward = self._select_forward(layer)
 
     def _select_forward(self, layer: torch.nn.Module) -> Callable:
-        if current_platform.is_tpu() or current_platform.is_cpu():
+        if (
+            current_platform.is_tpu()
+            or current_platform.is_cpu()
+            or current_platform.device_name == "mcpu"
+        ):
             # TODO: Once the OOM issue for the TPU backend is resolved, we
             # will switch to using the moe_forward custom op.
             # Note: CPU doesn't require wrapped forward_impl.
