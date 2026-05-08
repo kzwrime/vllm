@@ -22,7 +22,6 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
-from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 
 
@@ -73,11 +72,11 @@ def fused_grouped_topk(
 
 
 # This is used by the Deepseek-V2 and Deepseek-V3 model
-@torch.compile(
-    dynamic=True,
-    backend=current_platform.simple_compile_backend,
-    options=maybe_disable_graph_partition(current_platform.simple_compile_backend),
-)
+# @torch.compile(
+#     dynamic=True,
+#     backend=current_platform.simple_compile_backend,
+#     options=maybe_disable_graph_partition(current_platform.simple_compile_backend),
+# )
 def grouped_topk(
     hidden_states: torch.Tensor,
     gating_output: torch.Tensor,
@@ -109,6 +108,39 @@ def grouped_topk(
         )
 
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
+    if scoring_func == "softmax":
+        scoring_func_idx = 0
+    elif scoring_func == "sigmoid":
+        scoring_func_idx = 1
+    else:
+        raise ValueError(f"Unsupported scoring function: {scoring_func}")
+
+    num_token = hidden_states.shape[0]
+
+    topk_weights = torch.empty(
+        (num_token, topk), dtype=torch.float32, device=hidden_states.device
+    )
+    topk_ids = torch.empty(
+        (num_token, topk), dtype=torch.int32, device=hidden_states.device
+    )
+    import torch_xcpu
+
+    if e_score_correction_bias is None:
+        e_score_correction_bias = torch.empty(0)
+    torch_xcpu.ops.grouped_topk(
+        gating_output=hidden_states,
+        topk=topk,
+        renormalize=renormalize,
+        bias=e_score_correction_bias,
+        num_expert_group=num_expert_group,
+        topk_group=topk_group,
+        scoring_func=scoring_func_idx,
+        routed_scaling_factor=routed_scaling_factor,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+    )
+
+    return topk_weights, topk_ids
 
     if scoring_func == "softmax":
         scores = torch.softmax(gating_output, dim=-1)
@@ -333,7 +365,7 @@ class GroupedTopKRouter(BaseRouter):
                 num_fused_shared_experts=self.num_fused_shared_experts,
             )
         else:
-            grouped_topk_impl = grouped_topk
+            grouped_topk_impl = grouped_topk  # type: ignore[assignment]
 
         topk_weights, topk_ids = grouped_topk_impl(
             hidden_states=hidden_states,

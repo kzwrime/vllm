@@ -6,7 +6,6 @@ import torch
 
 from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 
 
@@ -92,6 +91,25 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             self.topk_tokens = self.indexer.topk_tokens
             self.topk_indices_buffer = mla_modules.topk_indices_buffer
 
+        from vllm.config import get_current_vllm_config
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        vllm_config = get_current_vllm_config()
+        if vllm_config.attention_config.backend == AttentionBackendEnum.TRITON_MLA:
+            from vllm.platforms import current_platform
+
+            attention_cls = current_platform.get_attn_backend_cls(
+                AttentionBackendEnum.TRITON_MLA,
+                attn_selector_config=None,
+            )
+            if not attention_cls:
+                raise ValueError(
+                    f"Invalid attention backend for {current_platform.device_name}"
+                )
+            from vllm.utils.import_utils import resolve_obj_by_qualname
+
+            MLAAttention = resolve_obj_by_qualname(attention_cls).get_impl_cls()
+
         self.mla_attn = MLAAttention(
             num_heads=self.num_heads,
             scale=scale,
@@ -155,9 +173,11 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         k_pe = k_pe.unsqueeze(1)
 
         if self.rotary_emb is not None:
-            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                positions, q[..., self.qk_nope_head_dim :], k_pe
+            q_nope, q_pe = q.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
             )
+            q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+            q = torch.cat((q_nope, q_pe), dim=-1)
 
         if self.indexer and self.is_sparse:
             _topk_indices = self.indexer(

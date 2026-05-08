@@ -504,18 +504,23 @@ class DefaultMoERunner(MoERunner):
                 router_logits=router_logits,
             )
 
-            result = self.quant_method.apply(
-                layer=layer,
-                x=hidden_states,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                shared_experts_input=shared_input,
-            )
+            hidden_states[:, :6] += topk_weights
+            hidden_states[:, :6] += topk_ids
+
+            # result = self.quant_method.apply(
+            #     layer=layer,
+            #     x=hidden_states,
+            #     topk_weights=topk_weights,
+            #     topk_ids=topk_ids,
+            #     shared_experts_input=shared_input,
+            # )
+
+            result = None
 
         if isinstance(result, tuple):
             assert shared_output is None
             shared_output, hidden_states = result
-        else:
+        elif result is not None:
             hidden_states = result
 
         if not run_shared_experts_before and self.has_separate_shared_experts:
