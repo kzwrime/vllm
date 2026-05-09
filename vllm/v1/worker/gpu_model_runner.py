@@ -5206,6 +5206,7 @@ class GPUModelRunner(
         num_active_loras: int = 0,
         profile_seq_lens: int | None = None,
         skip_attn_for_dummy_run: bool = False,
+        skip_compile_for_dummy_run: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -5229,7 +5230,8 @@ class GPUModelRunner(
                 (1 token) and prefill (multiple tokens) requests.
             remove_lora: If False, dummy LoRAs are not destroyed after the run
             skip_attn_for_dummy_run: If True, skip attention metadata for the
-                dummy run and bypass the compiled model path.
+                dummy run.
+            skip_compile_for_dummy_run: If True, bypass the compiled model path.
             num_active_loras: Number of distinct active LoRAs to capture for.
                 LoRA is activated when num_active_loras > 0.
             profile_seq_lens: If provided, use this value for seq_lens instead
@@ -5474,7 +5476,7 @@ class GPUModelRunner(
                     batch_descriptor=batch_desc,
                     ubatch_slices=ubatch_slices_padded,
                     slot_mapping=slot_mappings,
-                    skip_compiled=skip_attn_for_dummy_run,
+                    skip_compiled=skip_compile_for_dummy_run,
                 ),
             ):
                 outputs = self.model(
@@ -5724,7 +5726,7 @@ class GPUModelRunner(
         max_task = max(output_size.items(), key=lambda x: x[1])[0]
         return self._dummy_pooler_run_task(hidden_states, max_task)
 
-    def profile_run(self) -> None:
+    def profile_run(self, skip_compile: bool = False) -> None:
         # Profile with multimodal encoder & encoder cache.
         if self.supports_mm_inputs:
             mm_config = self.model_config.multimodal_config
@@ -5789,6 +5791,7 @@ class GPUModelRunner(
             self.max_num_tokens,
             is_profile=True,
             skip_attn_for_dummy_run=True,
+            skip_compile_for_dummy_run=skip_compile,
         )
         if get_pp_group().is_last_rank:
             if self.is_pooling_model:

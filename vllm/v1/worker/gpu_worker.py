@@ -367,7 +367,7 @@ class Worker(WorkerBase):
             self.init_snapshot,
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
-            self.model_runner.profile_run()
+            self.model_runner.profile_run(skip_compile=True)
 
             profile_torch_peak = torch.accelerator.memory_stats(self.device).get(
                 "allocated_bytes.all.peak", 0
@@ -897,7 +897,8 @@ class Worker(WorkerBase):
         self.model_runner._dummy_run(
             num_tokens,
             uniform_decode=True,
-            skip_attn_for_dummy_run=True,
+            force_attention=True,
+            skip_attn_for_dummy_run=False,
         )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:

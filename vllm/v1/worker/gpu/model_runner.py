@@ -392,11 +392,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens: int,
         *args,
         skip_attn: bool = True,
+        skip_attn_for_dummy_run: bool | None = None,
+        skip_compile: bool = False,
         uniform_decode: bool = False,
         skip_eplb: bool = False,
         is_profile: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        if skip_attn_for_dummy_run is not None:
+            skip_attn = skip_attn_for_dummy_run
+
         # Create a dummy scheduler output.
         num_reqs = min(num_tokens, self.max_num_reqs)
         if uniform_decode:
@@ -433,6 +438,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             intermediate_tensors=intermediate_tensors,
             dummy_run=True,
             skip_attn_for_dummy_run=skip_attn,
+            skip_compile_for_dummy_run=skip_compile,
         )
         self.kv_connector.set_disabled(False)
 
@@ -508,9 +514,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.pooling_runner.dummy_pooler_run(hidden_states)
 
     @torch.inference_mode()
-    def profile_run(self) -> None:
+    def profile_run(self, skip_compile: bool = False) -> None:
         hidden_states, sample_hidden_states = self._dummy_run(
-            self.max_num_tokens, skip_attn=True, is_profile=True
+            self.max_num_tokens,
+            skip_attn=True,
+            skip_compile=skip_compile,
+            is_profile=True,
         )
 
         # Only run sampler/pooler on last PP rank (non-last ranks return None).
@@ -911,6 +920,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         intermediate_tensors: IntermediateTensors | None = None,
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
+        skip_compile_for_dummy_run: bool = False,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
             # Update the request states.
@@ -948,7 +958,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs=num_reqs,
             )
 
-        if skip_attn_for_dummy_run:
+        if skip_compile_for_dummy_run:
             skip_compiled = True
         if self.dp_size > 1:
             batch_desc, num_tokens_across_dp = sync_cudagraph_and_dp_padding(
