@@ -144,6 +144,7 @@ if TYPE_CHECKING:
     VLLM_ENABLE_MOE_DP_CHUNK: bool = True
     VLLM_ENABLE_SEQUENCE_PARALLEL_MOE: bool = True
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
+    VLLM_XCPU_ENABLE_DUMMY_RUN_FAST_PATH: bool = True
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
     VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY: str = ""
     VLLM_RAY_EXTRA_ENV_VARS_TO_COPY: str = ""
@@ -1141,6 +1142,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS", "0"
     )
     == "1",
+    # Let xcpu kernels skip non-essential token work during runtime DP dummy
+    # runs while still preserving synchronization collectives.
+    "VLLM_XCPU_ENABLE_DUMMY_RUN_FAST_PATH": lambda: bool(
+        int(os.getenv("VLLM_XCPU_ENABLE_DUMMY_RUN_FAST_PATH", "1"))
+    ),
     # Strategy to pack the data parallel ranks for Ray.
     # Available options:
     # - "fill":
@@ -1813,6 +1819,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_DP_MASTER_IP",
         "VLLM_DP_MASTER_PORT",
         "VLLM_RANDOMIZE_DP_DUMMY_INPUTS",
+        "VLLM_XCPU_ENABLE_DUMMY_RUN_FAST_PATH",
         "VLLM_CI_USE_S3",
         "VLLM_MODEL_REDIRECT_PATH",
         "VLLM_HOST_IP",

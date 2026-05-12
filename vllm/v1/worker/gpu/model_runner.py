@@ -27,6 +27,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
@@ -38,6 +39,7 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
@@ -432,15 +434,34 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert self.intermediate_tensors is not None
             intermediate_tensors = self.intermediate_tensors[:num_tokens]
 
-        # Execute the model.
-        self.execute_model(
-            dummy_scheduler_output,
-            intermediate_tensors=intermediate_tensors,
-            dummy_run=True,
-            skip_attn_for_dummy_run=skip_attn,
-            skip_compile_for_dummy_run=skip_compile,
+        enable_xcpu_moe_dummy_run = (
+            envs.VLLM_XCPU_ENABLE_DUMMY_RUN_FAST_PATH
+            and current_platform.device_name == "mcpu"
+            and self.vllm_config.parallel_config.data_parallel_size > 1
+            and self.vllm_config.parallel_config.is_moe_model is not False
+            and not is_profile
+            and not skip_eplb
+            and num_tokens <= 1
         )
-        self.kv_connector.set_disabled(False)
+        from torch_xcpu import ops as xcpu_ops
+
+        previous_xcpu_dummy_run = False
+        try:
+            if enable_xcpu_moe_dummy_run:
+                previous_xcpu_dummy_run = bool(xcpu_ops.is_dummy_run())
+                xcpu_ops.set_dummy_run(True)
+
+            # Execute the model.
+            self.execute_model(
+                dummy_scheduler_output,
+                intermediate_tensors=intermediate_tensors,
+                dummy_run=True,
+                skip_attn_for_dummy_run=skip_attn,
+                skip_compile_for_dummy_run=skip_compile,
+            )
+        finally:
+            xcpu_ops.set_dummy_run(previous_xcpu_dummy_run)
+            self.kv_connector.set_disabled(False)
 
         # Non-last PP ranks don't produce output for sampling.
         if not self.is_last_pp_rank:
