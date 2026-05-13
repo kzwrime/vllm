@@ -347,8 +347,15 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             )
             return logits
 
-        base = torch.arange(self.config.draft_vocab_size, device=logits.device)
-        targets = base + self.draft_id_to_target_id
+        base = torch.arange(
+            self.config.draft_vocab_size, device=logits.device, dtype=torch.long
+        )
+        # normly, draft_id_to_target_id should already be int64,
+        # but we add this just in case to avoid potential issues
+        draft_id_to_target_id = self.draft_id_to_target_id.to(
+            device=logits.device, dtype=torch.long
+        )
+        targets = base + draft_id_to_target_id
         logits_new = logits.new_full(
             (
                 logits.shape[0],
