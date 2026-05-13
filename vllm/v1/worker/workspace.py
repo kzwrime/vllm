@@ -177,6 +177,28 @@ class WorkspaceManager:
             )
         return workspace
 
+    def clear(self) -> None:
+        """Drop temporary scratch references in every ubatch and lane.
+
+        Manager configuration and cached persistent resources are preserved.
+        The manager must be unlocked and scratch consumers must have finished.
+        """
+        if self._locked:
+            raise AssertionError("Cannot clear workspace while it is locked.")
+
+        if envs.VLLM_DEBUG_WORKSPACE:
+            logger.info(
+                "[WORKSPACE DEBUG] Clearing temporary scratch. Current sizes: %s",
+                [
+                    self._workspace_size_bytes(ws) / _MB
+                    for ws in self._current_workspaces
+                    if ws is not None
+                ],
+            )
+
+        for workspace_id in range(len(self._current_workspaces)):
+            self._current_workspaces[workspace_id] = None
+
     def get_simultaneous(
         self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
     ) -> list[torch.Tensor]:
@@ -368,6 +390,11 @@ def unlock_workspace() -> None:
     called again to prevent unexpected allocations.
     """
     current_workspace_manager().unlock()
+
+
+def clear_workspace() -> None:
+    """Clear temporary scratch, preserving configuration and persistent resources."""
+    current_workspace_manager().clear()
 
 
 def reset_workspace_manager() -> None:
