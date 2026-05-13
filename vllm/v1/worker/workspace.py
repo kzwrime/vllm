@@ -87,6 +87,28 @@ class WorkspaceManager:
         """Check if workspace is locked."""
         return self._locked
 
+    def clear(self) -> None:
+        """Release currently allocated workspace buffers.
+
+        This keeps the manager configuration intact but drops tensor references
+        so a later warmup/compile run observes fresh allocations.
+        """
+        if self._locked:
+            raise AssertionError("Cannot clear workspace while it is locked.")
+
+        if envs.VLLM_DEBUG_WORKSPACE:
+            logger.info(
+                "[WORKSPACE DEBUG] Clearing workspace buffers. Current sizes: %s",
+                [
+                    self._workspace_size_bytes(ws) / _MB
+                    for ws in self._current_workspaces
+                    if ws is not None
+                ],
+            )
+
+        for ubatch_id in range(len(self._current_workspaces)):
+            self._current_workspaces[ubatch_id] = None
+
     def get_simultaneous(
         self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
     ) -> list[torch.Tensor]:
@@ -268,6 +290,11 @@ def unlock_workspace() -> None:
     called again to prevent unexpected allocations.
     """
     current_workspace_manager().unlock()
+
+
+def clear_workspace() -> None:
+    """Release allocated workspace tensors without resetting the manager."""
+    current_workspace_manager().clear()
 
 
 def reset_workspace_manager() -> None:
