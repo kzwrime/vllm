@@ -1367,7 +1367,10 @@ def initialize_single_dummy_weight(
         torch._sync(param)
         return
 
-    generator = torch.Generator(device=param.data.device)
+    generator_device = param.data.device
+    if generator_device.type in ("mcpu", "privateuseone"):
+        generator_device = torch.device("cpu")
+    generator = torch.Generator(device=generator_device)
     generator.manual_seed(seed)
     if torch.finfo(param.data.dtype).bits < 16:
         # uniform_ doesn't support < 16-bit datatypes (FP8)
