@@ -722,7 +722,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # If set, vllm will use torch_xcpu top-k/top-p sampler implementation.
     "VLLM_USE_XCPU_TOPK_TOPP_SAMPLER": lambda: bool(
-        int(os.environ.get("VLLM_USE_XCPU_TOPK_TOPP_SAMPLER", "0"))
+        int(os.environ.get("VLLM_USE_XCPU_TOPK_TOPP_SAMPLER", "1"))
     ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
