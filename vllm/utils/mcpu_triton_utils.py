@@ -4,10 +4,10 @@
 """
 mcpu C++ implementations of Triton kernels used in the GPU model runner.
 
-This module provides mcpu C++ replacements for the pure-PyTorch fallbacks in
-torch_triton_utils. Each function delegates to
-a C++ operator registered under torch.ops.mcpu.vllm_* (implemented in
-torch_mcpu/csrc/aten/vllm_kernels/).
+This module provides mcpu/xcpu C++ replacements for the pure-PyTorch fallbacks
+in torch_triton_utils. Most functions delegate to C++ operators registered
+under torch.ops.mcpu.vllm_*; operators shared with the xcpu kernel library
+delegate to torch_xcpu.ops.
 """
 
 from __future__ import annotations
@@ -189,19 +189,19 @@ def _gumbel_sample_kernel_impl(
     processed_logits_out: torch.Tensor | None = None,
     apply_temperature: bool = False,
 ) -> torch.Tensor:
+    import torch_xcpu.ops as xcpu_ops
+
     sampled_out = torch.empty(logits.shape[0], dtype=torch.int64, device=logits.device)
-    torch.ops.mcpu.vllm_gumbel_sample(
+    return xcpu_ops.gumbel_sample(
         logits,
         sampled_out,
         expanded_idx_mapping,
         temperature,
         seed,
         pos,
-        vocab_size,
-        processed_logits_out,
         apply_temperature,
+        processed_logits_out,
     )
-    return sampled_out
 
 
 _gumbel_sample_kernel = _FuncWrapper(_gumbel_sample_kernel_impl)
