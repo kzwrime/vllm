@@ -146,7 +146,7 @@ class ExampleConnector(KVConnectorBase_V1):
                     num_pages * page_size, -1
                 )
                 dst_kv_cache_layer[slot_mapping, ...] = src_kv_cache
-            elif isinstance(attn_metadata, TritonAttentionMetadata):
+            elif _is_triton_block_kv_layout(attn_metadata):
                 block_idxs = slot_mapping // self._block_size
                 offsets = slot_mapping % self._block_size
                 dst_kv_cache_layer[block_idxs, :, offsets] = src_kv_cache
@@ -188,7 +188,9 @@ class ExampleConnector(KVConnectorBase_V1):
                 filename = self._generate_filename_debug(
                     layer_name, request.token_ids, request.mm_hashes
                 )
-                kv_cache = safetensors.torch.load_file(filename)["kv_cache"].cuda()
+                kv_cache = safetensors.torch.load_file(filename)["kv_cache"].to(
+                    kv_cache_layer.device
+                )
                 if isinstance(attn_metadata, dict):
                     inject_kv_into_layer(
                         kv_cache_layer,
@@ -238,7 +240,7 @@ class ExampleConnector(KVConnectorBase_V1):
             if isinstance(attn_metadata, MLACommonMetadata):
                 num_pages, page_size = layer.shape[0], layer.shape[1]
                 return layer.reshape(num_pages * page_size, -1)[slot_mapping, ...]
-            elif isinstance(attn_metadata, TritonAttentionMetadata):
+            elif _is_triton_block_kv_layout(attn_metadata):
                 block_idxs = slot_mapping // self._block_size
                 offsets = slot_mapping % self._block_size
                 return layer[block_idxs, :, offsets]
@@ -453,3 +455,10 @@ class ExampleConnector(KVConnectorBase_V1):
 def align_to_block_size(num_tokens: int, block_size) -> int:
     """Align the number of tokens to the block size."""
     return (num_tokens - 1) // block_size * block_size
+
+
+def _is_triton_block_kv_layout(attn_metadata: AttentionMetadata) -> bool:
+    return (
+        isinstance(attn_metadata, TritonAttentionMetadata)
+        and getattr(attn_metadata, "kv_cache_tensor_layout", "BLOCK_KV") == "BLOCK_KV"
+    )

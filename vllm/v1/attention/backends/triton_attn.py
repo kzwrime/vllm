@@ -3,7 +3,7 @@
 """High-Performance Triton-only Attention layer."""
 
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 import torch
 
@@ -78,6 +78,7 @@ class TritonAttentionMetadata:
     scheduler_metadata: torch.Tensor | None = None
     prefix_scheduler_metadata: torch.Tensor | None = None
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
+    kv_cache_tensor_layout: Literal["BLOCK_KV", "KV_BLOCK"] = "BLOCK_KV"
 
     @property
     def mm_prefix_range_tensor(self) -> torch.Tensor | None:
