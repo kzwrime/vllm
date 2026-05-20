@@ -142,6 +142,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
     VLLM_ENABLE_MOE_DP_CHUNK: bool = True
+    VLLM_XCPU_MOE_MAX_RECV_TOKENS: int = 0
     VLLM_ENABLE_SEQUENCE_PARALLEL_MOE: bool = True
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_XCPU_ENABLE_DUMMY_RUN_FAST_PATH: bool = True
@@ -1131,6 +1132,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MOE_DP_CHUNK_SIZE": lambda: int(os.getenv("VLLM_MOE_DP_CHUNK_SIZE", "256")),
     "VLLM_ENABLE_MOE_DP_CHUNK": lambda: bool(
         int(os.getenv("VLLM_ENABLE_MOE_DP_CHUNK", "1"))
+    ),
+    "VLLM_XCPU_MOE_MAX_RECV_TOKENS": lambda: int(
+        os.getenv("VLLM_XCPU_MOE_MAX_RECV_TOKENS", "0")
     ),
     # Whether to enable sequence parallel for MoE models.
     # Setting to "0" disables sequence parallel for MoE.

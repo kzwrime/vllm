@@ -247,10 +247,17 @@ class DefaultMoERunner(MoERunner):
         self.moe_forward = self._select_forward(layer)
 
     def _select_forward(self, layer: torch.nn.Module) -> Callable:
+        mcpu_moe_multiround_enabled = (
+            current_platform.device_name == "mcpu"
+            and envs.VLLM_XCPU_MOE_MAX_RECV_TOKENS > 0
+        )
         if (
             current_platform.is_tpu()
             or current_platform.is_cpu()
-            or current_platform.device_name == "mcpu"
+            or (
+                current_platform.device_name == "mcpu"
+                and not mcpu_moe_multiround_enabled
+            )
         ):
             # TODO: Once the OOM issue for the TPU backend is resolved, we
             # will switch to using the moe_forward custom op.

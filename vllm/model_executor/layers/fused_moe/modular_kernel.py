@@ -9,6 +9,7 @@ from typing import final
 
 import torch
 
+from vllm.distributed import get_ep_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
@@ -1352,6 +1353,139 @@ class FusedMoEKernelModularImpl:
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:
             global_num_experts = local_num_experts
+
+        compute_send_rounds = getattr(
+            self.prepare_finalize, "compute_send_rounds_for_input", None
+        )
+        if compute_send_rounds is not None:
+            send_rounds = compute_send_rounds(
+                hidden_states,
+                topk_ids,
+                global_num_experts,
+            )
+            if len(send_rounds) > 1:
+                assert not self.prepare_finalize.supports_async()
+                assert not dbo_enabled()
+
+                ep_rank = get_ep_group().rank
+                # logger.debug(
+                #     "MoE multiround dispatch enabled: ep_rank=%d "
+                #     "local_tokens=%d topk=%d global_num_experts=%d "
+                #     "num_rounds=%d send_rounds=%s",
+                #     ep_rank,
+                #     hidden_states.size(0),
+                #     topk_ids.size(1),
+                #     global_num_experts,
+                #     len(send_rounds),
+                #     send_rounds,
+                # )
+                for round_idx, (start_rank, end_rank) in enumerate(send_rounds):
+                    round_is_active = start_rank <= ep_rank < end_rank
+                    if round_is_active:
+                        round_hidden_states = hidden_states
+                        round_topk_ids = topk_ids
+                        round_topk_weights = topk_weights
+                        round_output = output
+                    else:
+                        round_hidden_states = hidden_states[:0]
+                        round_topk_ids = topk_ids[:0]
+                        round_topk_weights = topk_weights[:0]
+                        round_output = torch.empty_like(hidden_states[:0])
+
+                    # logger.debug(
+                    #     "MoE multiround prepare: ep_rank=%d round=%d/%d "
+                    #     "active_sender_range=[%d,%d) is_active=%s "
+                    #     "round_local_tokens=%d original_local_tokens=%d",
+                    #     ep_rank,
+                    #     round_idx + 1,
+                    #     len(send_rounds),
+                    #     start_rank,
+                    #     end_rank,
+                    #     round_is_active,
+                    #     round_hidden_states.size(0),
+                    #     hidden_states.size(0),
+                    # )
+
+                    (
+                        a1q,
+                        a1q_scale,
+                        expert_tokens_meta,
+                        expert_topk_ids,
+                        expert_topk_weights,
+                    ) = self._prepare(
+                        round_hidden_states,
+                        round_topk_weights,
+                        round_topk_ids,
+                        global_num_experts,
+                        expert_map,
+                        apply_router_weight_on_input,
+                    )
+
+                    # logger.debug(
+                    #     "MoE multiround experts: ep_rank=%d round=%d/%d "
+                    #     "prepared_tokens=%d prepared_topk_shape=%s",
+                    #     ep_rank,
+                    #     round_idx + 1,
+                    #     len(send_rounds),
+                    #     a1q.size(0),
+                    #     tuple(expert_topk_ids.shape),
+                    # )
+
+                    fused_out = self._fused_experts(
+                        in_dtype=hidden_states.dtype,
+                        a1q=a1q,
+                        a1q_scale=a1q_scale,
+                        w1=w1,
+                        w2=w2,
+                        topk_weights=expert_topk_weights,
+                        topk_ids=expert_topk_ids,
+                        activation=activation,
+                        global_num_experts=global_num_experts,
+                        local_num_experts=local_num_experts,
+                        expert_map=expert_map,
+                        apply_router_weight_on_input=apply_router_weight_on_input,
+                        expert_tokens_meta=expert_tokens_meta,
+                    )
+
+                    # logger.debug(
+                    #     "MoE multiround finalize: ep_rank=%d round=%d/%d "
+                    #     "is_active=%s fused_out_shape=%s round_output_shape=%s",
+                    #     ep_rank,
+                    #     round_idx + 1,
+                    #     len(send_rounds),
+                    #     round_is_active,
+                    #     tuple(fused_out.shape),
+                    #     tuple(round_output.shape),
+                    # )
+
+                    self.prepare_finalize.finalize(
+                        round_output,
+                        fused_out,
+                        expert_topk_weights,
+                        expert_topk_ids,
+                        apply_router_weight_on_input,
+                        self.fused_experts.finalize_weight_and_reduce_impl(),
+                    )
+
+                    # logger.debug(
+                    #     "MoE multiround round complete: ep_rank=%d round=%d/%d "
+                    #     "is_active=%s",
+                    #     ep_rank,
+                    #     round_idx + 1,
+                    #     len(send_rounds),
+                    #     round_is_active,
+                    # )
+
+                if self.shared_experts is None:
+                    return output
+
+                se_hidden_states = (
+                    shared_experts_input
+                    if shared_experts_input is not None
+                    else hidden_states
+                )
+                shared_output = self.shared_experts(se_hidden_states)
+                return shared_output, output
 
         a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights = self._prepare(
             hidden_states,
