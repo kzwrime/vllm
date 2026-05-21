@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -12,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    SupportsHMA,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
@@ -82,7 +84,7 @@ class ExampleConnectorMetadata(KVConnectorMetadata):
         )
 
 
-class ExampleConnector(KVConnectorBase_V1):
+class ExampleConnector(KVConnectorBase_V1, SupportsHMA):
     # NOTE: This is Simple debug implementation of the KV connector.
     # It save / load the KV cache to / from the disk.
     # It does extra work which will overwrite the existing prefix-cache in GPU
@@ -100,7 +102,9 @@ class ExampleConnector(KVConnectorBase_V1):
             kv_cache_config=kv_cache_config,
         )
         self._block_size = vllm_config.cache_config.block_size
-        self._requests_need_load: dict[str, Request] = {}
+        self._requests_need_load: dict[str, tuple[Request, int]] = {}
+        self._matched_num_tokens: dict[str, int] = {}
+        self._pending_metadata: dict[str, tuple[torch.Tensor, list[str]]] = {}
         self._storage_path = self._kv_transfer_config.get_from_extra_config(
             "shared_storage_path", "/tmp"
         )
@@ -259,7 +263,17 @@ class ExampleConnector(KVConnectorBase_V1):
                 safetensors.torch.save_file(tensors, filename)
 
     def wait_for_save(self):
+        for foldername, (token_ids, mm_hashes) in self._pending_metadata.items():
+            self._write_metadata_debug(foldername, token_ids, mm_hashes)
+        self._pending_metadata.clear()
         return
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        return False, None
 
     def get_num_new_matched_tokens(
         self,
@@ -286,17 +300,17 @@ class ExampleConnector(KVConnectorBase_V1):
         # NOTE: in current v1 scheduler, the num_computed_tokens is aligned
         # with the block granularity. And it expects the returned blocks and
         # num_computed_tokens to also be aligned with the block granularity.
-        if not self._found_match_for_request(request):
+        num_matched_tokens = self._get_num_matched_tokens_for_request(request)
+        if num_matched_tokens <= num_computed_tokens:
             return 0, False
 
         logger.info("External Cache Hit!")
 
         # Now, first num_tokens_to_check tokens are hit, we need to prepare
         # the metadata for the worker connector to correctly load the KV
-        token_ids = request.prompt_token_ids or []
-        num_tokens_to_check = align_to_block_size(len(token_ids) - 1, self._block_size)
+        self._matched_num_tokens[request.request_id] = num_matched_tokens
 
-        return num_tokens_to_check - num_computed_tokens, False
+        return num_matched_tokens - num_computed_tokens, False
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -308,7 +322,13 @@ class ExampleConnector(KVConnectorBase_V1):
         such that we load the KVs in the next forward pass.
         """
         if num_external_tokens > 0:
-            self._requests_need_load[request.request_id] = request
+            num_matched_tokens = self._matched_num_tokens.pop(
+                request.request_id, num_external_tokens
+            )
+            self._requests_need_load[request.request_id] = (
+                request,
+                num_matched_tokens,
+            )
 
     def build_connector_meta(
         self,
@@ -329,8 +349,9 @@ class ExampleConnector(KVConnectorBase_V1):
             token_ids = new_req.prompt_token_ids or []
             mm_hashes = [f.identifier for f in new_req.mm_features]
             if new_req.req_id in self._requests_need_load:
+                request, num_matched_tokens = self._requests_need_load[new_req.req_id]
                 meta.add_request(
-                    token_ids=token_ids,
+                    token_ids=list(request.prompt_token_ids or [])[:num_matched_tokens],
                     block_ids=new_req.block_ids[0],
                     block_size=self._block_size,
                     is_store=False,
@@ -364,7 +385,7 @@ class ExampleConnector(KVConnectorBase_V1):
             # NOTE(rob): cached_req_data does not have the full
             # list of token ids (only new tokens). So we look it
             # up in the actual request object.
-            request = self._requests_need_load[req_id]
+            request, num_matched_tokens = self._requests_need_load[req_id]
             total_tokens = num_computed_tokens + num_new_tokens
             token_ids = request.all_token_ids[:total_tokens]
 
@@ -374,7 +395,7 @@ class ExampleConnector(KVConnectorBase_V1):
             block_ids = new_block_ids[0]
 
             meta.add_request(
-                token_ids=token_ids,
+                token_ids=token_ids[:num_matched_tokens],
                 block_ids=block_ids,
                 block_size=self._block_size,
                 is_store=False,
@@ -395,7 +416,13 @@ class ExampleConnector(KVConnectorBase_V1):
         request: "Request",
     ) -> bool:
         """Check if the cache is hit for the request."""
-        return self._found_match_for_prompt(
+        return self._get_num_matched_tokens_for_request(request) > 0
+
+    def _get_num_matched_tokens_for_request(
+        self,
+        request: "Request",
+    ) -> int:
+        return self._get_num_matched_tokens_for_prompt(
             list(request.prompt_token_ids or []),
             [f.identifier for f in request.mm_features],
         )
@@ -405,6 +432,19 @@ class ExampleConnector(KVConnectorBase_V1):
         prompt_token_ids: list[int],
         mm_hashes: list[str],
     ) -> bool:
+        return self._get_num_matched_tokens_for_prompt(prompt_token_ids, mm_hashes) > 0
+
+    def _get_num_matched_tokens_for_prompt(
+        self,
+        prompt_token_ids: list[int],
+        mm_hashes: list[str],
+    ) -> int:
+        max_num_tokens = align_to_block_size(len(prompt_token_ids), self._block_size)
+        if max_num_tokens <= 0:
+            return 0
+
+        # Fast path for the common case where the decode prompt is exactly
+        # cached_prompt + one generated token.
         num_tokens_to_check = align_to_block_size(
             len(prompt_token_ids) - 1, self._block_size
         )
@@ -413,7 +453,40 @@ class ExampleConnector(KVConnectorBase_V1):
             mm_hashes,
             create_folder=False,
         )
-        return os.path.exists(foldername)
+        if num_tokens_to_check > 0 and self._is_complete_folder_debug(foldername):
+            return num_tokens_to_check
+
+        # Chat templates can tokenize the prefilled text into more than one
+        # token. Fall back to the longest cached prefix recorded on disk.
+        best = 0
+        if not os.path.isdir(self._storage_path):
+            return best
+        for entry in os.scandir(self._storage_path):
+            if not entry.is_dir():
+                continue
+            metadata_file = os.path.join(entry.path, "metadata.json")
+            try:
+                with open(metadata_file, encoding="utf-8") as f:
+                    metadata = json.load(f)
+            except (FileNotFoundError, OSError, json.JSONDecodeError):
+                continue
+            if metadata.get("mm_hashes", []) != mm_hashes:
+                continue
+            token_ids = metadata.get("token_ids")
+            if not isinstance(token_ids, list):
+                continue
+            num_tokens = len(token_ids)
+            if (
+                num_tokens > best
+                and num_tokens <= max_num_tokens
+                and num_tokens % self._block_size == 0
+                and prompt_token_ids[:num_tokens] == token_ids
+            ):
+                best = num_tokens
+        return best
+
+    def _is_complete_folder_debug(self, foldername: str) -> bool:
+        return os.path.exists(os.path.join(foldername, "metadata.json"))
 
     def _generate_foldername_debug(
         self,
@@ -435,7 +508,26 @@ class ExampleConnector(KVConnectorBase_V1):
         foldername = os.path.join(self._storage_path, input_ids_hash)
         if create_folder:
             os.makedirs(foldername, exist_ok=True)
+            self._pending_metadata[foldername] = (token_ids.clone(), list(mm_hashes))
         return foldername
+
+    def _write_metadata_debug(
+        self,
+        foldername: str,
+        token_ids: torch.Tensor,
+        mm_hashes: list[str],
+    ) -> None:
+        metadata_file = os.path.join(foldername, "metadata.json")
+        if os.path.exists(metadata_file):
+            return
+        metadata = {
+            "token_ids": token_ids.tolist(),
+            "mm_hashes": mm_hashes,
+        }
+        tmp_file = f"{metadata_file}.{os.getpid()}.tmp"
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(metadata, f)
+        os.replace(tmp_file, metadata_file)
 
     def _generate_filename_debug(
         self,
@@ -454,7 +546,7 @@ class ExampleConnector(KVConnectorBase_V1):
 
 def align_to_block_size(num_tokens: int, block_size) -> int:
     """Align the number of tokens to the block size."""
-    return (num_tokens - 1) // block_size * block_size
+    return num_tokens // block_size * block_size
 
 
 def _is_triton_block_kv_layout(attn_metadata: AttentionMetadata) -> bool:
