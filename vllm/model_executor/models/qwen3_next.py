@@ -78,6 +78,19 @@ logger = init_logger(__name__)
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
+def _sigmoid_and_mul(
+    attn_output: torch.Tensor,
+    gate: torch.Tensor,
+) -> torch.Tensor:
+    if attn_output.device.type in ("mcpu", "privateuseone"):
+        import torch_xcpu
+
+        torch_xcpu.ops.sigmoid_and_mul(attn_output, attn_output, gate)
+        return attn_output
+
+    return attn_output * torch.sigmoid(gate)
+
+
 class Qwen3NextSparseMoeBlock(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -313,7 +326,7 @@ class Qwen3NextAttention(nn.Module):
 
         if self.attn_output_gate:
             attn_output = attn_output.view(*orig_shape, self.num_heads, self.head_dim)
-            attn_output = attn_output * torch.sigmoid(gate)
+            attn_output = _sigmoid_and_mul(attn_output, gate)
             attn_output = attn_output.view(*orig_shape, self.num_heads * self.head_dim)
 
         output[:], _ = self.o_proj(attn_output)
