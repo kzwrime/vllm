@@ -555,12 +555,26 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        z_shape_og = z.shape
-        # Reshape input data into 2D tensor
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
+        if (
+            core_attn_out.dim() != 3
+            or z.dim() != 3
+            or core_attn_out.shape != z.shape
+            or core_attn_out.shape[1] != self.num_v_heads // self.tp_size
+            or core_attn_out.shape[2] != self.head_v_dim
+            or core_attn_out.stride(-1) != 1
+            or z.stride(-1) != 1
+        ):
+            raise RuntimeError(
+                "GDN RMSNormGated expects core_attn_out and z with shape "
+                "[tokens, local value heads, value head dim] and contiguous "
+                "last dimension."
+            )
+        # Keep the per-head layout for gated RMSNorm. The native implementation
+        # normalizes over the last dimension, and the XCPU kernel accepts this
+        # 3D layout as long as each row's last dimension is contiguous. Flattening
+        # the strided z view early would force Inductor to materialize a clone
+        # before rms_norm_gated.
         core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         output[:num_tokens], _ = self.out_proj(core_attn_out)
 
