@@ -678,6 +678,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 "XCPU GDN decode-only compile path requires non_spec_query_start_loc."
             )
         num_actual_tokens_tensor = attn_metadata_i.non_spec_query_start_loc[-1:]
+        conv_out = torch.empty_like(mixed_qkv)
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
@@ -686,6 +687,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             b,
             a,
             core_attn_out,
+            conv_out,
             self.A_log,
             self.dt_bias,
             conv_weights,
