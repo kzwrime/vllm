@@ -4,11 +4,13 @@ import math
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from itertools import count
 from itertools import product as iprod
 from typing import Any
 
 import torch
 
+from vllm import envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -35,6 +37,8 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
+
+_XCPU_GDN_DECODE_STATE_HANDLE_COUNTER = count(1)
 
 
 @triton.jit
@@ -476,6 +480,27 @@ def bind_kv_cache(
             layers with layer names as keys.
         runner_kv_caches: The kv_cache declared by ModelRunner.
     """
+    if envs.VLLM_XCPU_GDN_DECODE_ONLY_COMPILE:
+        for layer_name, kv_cache in kv_caches.items():
+            layer = forward_context[layer_name]
+            if (
+                getattr(layer, "mamba_type", None) == "gdn_attention"
+                and isinstance(kv_cache, list)
+                and len(kv_cache) == 2
+                and isinstance(kv_cache[0], torch.Tensor)
+                and isinstance(kv_cache[1], torch.Tensor)
+            ):
+                import torch_xcpu.ops_defs.gdn_decode_state  # noqa: F401
+
+                old_handle = getattr(layer, "_xcpu_gdn_decode_state_handle_019", None)
+                handle = next(_XCPU_GDN_DECODE_STATE_HANDLE_COUNTER)
+                torch.ops.torch_xcpu.register_gdn_decode_state(
+                    handle, kv_cache[0], kv_cache[1]
+                )
+                layer._xcpu_gdn_decode_state_handle_019 = handle
+                if old_handle is not None:
+                    torch.ops.torch_xcpu.unregister_gdn_decode_state(old_handle)
+
     # Bind kv_caches to ModelRunner
     assert len(runner_kv_caches) == 0
 

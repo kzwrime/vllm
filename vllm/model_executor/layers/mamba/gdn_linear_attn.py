@@ -544,13 +544,21 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             device=hidden_states.device,
         )
 
-        torch.ops.vllm.gdn_attention_core(
-            mixed_qkv,
-            b,
-            a,
-            core_attn_out,
-            self.prefix,
-        )
+        if self._should_use_decode_only_compile_path():
+            self._forward_core_decode_non_spec_compile(
+                mixed_qkv=mixed_qkv,
+                b=b,
+                a=a,
+                core_attn_out=core_attn_out,
+            )
+        else:
+            torch.ops.vllm.gdn_attention_core(
+                mixed_qkv,
+                b,
+                a,
+                core_attn_out,
+                self.prefix,
+            )
 
         # ============================================================
         # Part 3: Output Projection
@@ -563,6 +571,78 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         output[:num_tokens], _ = self.out_proj(core_attn_out)
+
+    def _should_use_decode_only_compile_path(self) -> bool:
+        if not envs.VLLM_XCPU_GDN_DECODE_ONLY_COMPILE:
+            return False
+        forward_context = get_forward_context()
+        attn_metadata: AttentionMetadata = forward_context.attn_metadata
+        if not isinstance(attn_metadata, dict):
+            return False
+        attn_metadata_i = attn_metadata[self.prefix]
+        assert isinstance(attn_metadata_i, GDNAttentionMetadata)
+        return (
+            self.enable_packed_recurrent_decode
+            and attn_metadata_i.spec_sequence_masks is None
+            and attn_metadata_i.num_prefills == 0
+            and attn_metadata_i.num_decodes > 0
+        )
+
+    def _forward_core_decode_non_spec_compile(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        core_attn_out: torch.Tensor,
+    ) -> None:
+        forward_context = get_forward_context()
+        attn_metadata: AttentionMetadata = forward_context.attn_metadata
+        assert isinstance(attn_metadata, dict)
+        attn_metadata_i = attn_metadata[self.prefix]
+        assert isinstance(attn_metadata_i, GDNAttentionMetadata)
+        state_handle = getattr(self, "_xcpu_gdn_decode_state_handle_019", None)
+        if state_handle is None:
+            raise RuntimeError(
+                "XCPU GDN decode-only compile path for vLLM 0.19.0 requires "
+                "a registered Mamba cache handle. Disable it with "
+                "VLLM_XCPU_GDN_DECODE_ONLY_COMPILE=0."
+            )
+
+        # vLLM 0.19.0-specific decode-only compile path. Keep the Python side
+        # to metadata lookup only; the full _forward_core_decode_non_spec body
+        # is implemented by torch_xcpu::gdn_decode_non_spec_core.
+        import torch_xcpu.ops_defs.gdn_decode_state  # noqa: F401
+
+        non_spec_state_indices_tensor = attn_metadata_i.non_spec_state_indices_tensor
+        if non_spec_state_indices_tensor is None:
+            raise RuntimeError(
+                "XCPU GDN decode-only compile path requires "
+                "non_spec_state_indices_tensor."
+            )
+        if attn_metadata_i.non_spec_query_start_loc is None:
+            raise RuntimeError(
+                "XCPU GDN decode-only compile path requires non_spec_query_start_loc."
+            )
+        num_actual_tokens_tensor = attn_metadata_i.non_spec_query_start_loc[-1:]
+        conv_weights = self.conv1d.weight.view(
+            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+        )
+        torch.ops.torch_xcpu.gdn_decode_non_spec_core(
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
+            self.A_log,
+            self.dt_bias,
+            conv_weights,
+            self.conv1d.bias,
+            non_spec_state_indices_tensor,
+            num_actual_tokens_tensor,
+            self.head_k_dim**-0.5,
+            state_handle,
+            self.activation in ("silu", "swish"),
+            True,
+        )
 
     def _warmup_prefill_kernels(self, mixed_qkv: torch.Tensor) -> None:
         """Warm up GDN prefill kernels during V1 profiling.
