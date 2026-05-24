@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter, UninitializedParameter
 
+from vllm import envs
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -55,6 +56,13 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
         set_weight_attrs(weight, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if envs.VLLM_USE_XCPU_LINEAR and isinstance(layer, ParallelLMHead):
+            from vllm.model_executor.layers.utils import dispatch_xcpu_unquantized_gemm
+
+            remove_weight = not getattr(layer, "_is_weight_tied", False)
+            dispatch_xcpu_unquantized_gemm(layer, remove_weight=remove_weight)
+            return
+
         if current_platform.is_cpu():
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
@@ -536,6 +544,7 @@ class ParallelLMHead(VocabParallelEmbedding):
             prefix,
         )
         self.quant_config = quant_config
+        self._is_weight_tied = False
         if bias:
             self.bias = Parameter(
                 torch.empty(self.num_embeddings_per_partition, dtype=params_dtype)
@@ -557,6 +566,7 @@ class ParallelLMHead(VocabParallelEmbedding):
             return embed_tokens
         else:
             self.weight = embed_tokens.weight
+            self._is_weight_tied = True
             return self
 
     def forward(self, input_):

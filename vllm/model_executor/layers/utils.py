@@ -98,8 +98,46 @@ def default_unquantized_gemm(
     if envs.VLLM_USE_XCPU_LINEAR:
         import torch_xcpu
 
+        xcpu_linear = getattr(layer, "xcpu_linear", None)
+        if xcpu_linear is not None:
+            return xcpu_linear(x, weight, bias)
         return torch_xcpu.ops.linear(x, weight, bias)
+
     return torch.nn.functional.linear(x, weight, bias)
+
+
+def dispatch_xcpu_unquantized_gemm(
+    layer: torch.nn.Module,
+    remove_weight: bool,
+) -> None:
+    import torch_xcpu
+
+    if layer.weight.is_meta:
+        layer.xcpu_linear = torch_xcpu.ops.linear
+        return
+
+    has_bias = getattr(layer, "bias", None) is not None
+    if has_bias:
+        layer.xcpu_linear = lambda x, weight, bias: torch_xcpu.ops.linear(
+            x, weight, bias
+        )
+        return
+
+    if not torch_xcpu.ops.can_prepack_linear_weight(layer.weight, "auto", False):
+        layer.xcpu_linear = lambda x, weight, bias: torch_xcpu.ops.linear(
+            x, weight, bias
+        )
+        return
+
+    packed_weight = torch_xcpu.ops.prepack_linear_weight(layer.weight, "auto", False)
+    layer.xcpu_linear = lambda x, weight, bias: torch_xcpu.ops.linear_prepacked(
+        x, packed_weight, bias
+    )
+    if remove_weight and packed_weight is not layer.weight:
+        layer.weight = torch.nn.Parameter(
+            torch.empty(0, dtype=layer.weight.dtype, device=layer.weight.device),
+            requires_grad=False,
+        )
 
 
 def use_aiter_triton_gemm(n, m, k, dtype):
@@ -238,7 +276,6 @@ def dispatch_cpu_unquantized_gemm(
     if envs.VLLM_USE_XCPU_LINEAR:
         import torch_xcpu
 
-        # has_bias = getattr(layer, "bias", None) is not None
         layer.cpu_linear = lambda x, weight, bias: torch_xcpu.ops.linear(
             x, weight, bias
         )
