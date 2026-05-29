@@ -98,7 +98,13 @@ class EngineCore:
         # plugins need to be loaded at the engine/scheduler level too
         from vllm.plugins import load_general_plugins
 
+        engine_start = time.perf_counter()
+        phase_start = engine_start
         load_general_plugins()
+        logger.info(
+            "[TIMING] engine.load_general_plugins: %.6f seconds",
+            time.perf_counter() - phase_start,
+        )
 
         self.vllm_config = vllm_config
         if not vllm_config.parallel_config.data_parallel_rank_local:
@@ -111,7 +117,12 @@ class EngineCore:
         self.log_stats = log_stats
 
         # Setup Model.
+        phase_start = time.perf_counter()
         self.model_executor = executor_class(vllm_config)
+        logger.info(
+            "[TIMING] engine.executor_init: %.6f seconds",
+            time.perf_counter() - phase_start,
+        )
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
 
@@ -121,8 +132,18 @@ class EngineCore:
             self._eep_scale_up_before_kv_init()
 
         # Setup KV Caches and update CacheConfig after profiling.
+        phase_start = time.perf_counter()
         kv_cache_config = self._initialize_kv_caches(vllm_config)
+        logger.info(
+            "[TIMING] engine.initialize_kv_caches_total: %.6f seconds",
+            time.perf_counter() - phase_start,
+        )
+        phase_start = time.perf_counter()
         self.structured_output_manager = StructuredOutputManager(vllm_config)
+        logger.info(
+            "[TIMING] engine.structured_output_manager_init: %.6f seconds",
+            time.perf_counter() - phase_start,
+        )
 
         # Setup scheduler.
         Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
@@ -140,6 +161,7 @@ class EngineCore:
             * vllm_config.parallel_config.prefill_context_parallel_size
         )
 
+        phase_start = time.perf_counter()
         self.scheduler: SchedulerInterface = Scheduler(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
@@ -148,13 +170,27 @@ class EngineCore:
             log_stats=self.log_stats,
             block_size=scheduler_block_size,
         )
+        logger.info(
+            "[TIMING] engine.scheduler_init: %.6f seconds",
+            time.perf_counter() - phase_start,
+        )
         self.use_spec_decode = vllm_config.speculative_config is not None
         if self.scheduler.connector is not None:  # type: ignore
+            phase_start = time.perf_counter()
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
+            logger.info(
+                "[TIMING] engine.init_kv_output_aggregator: %.6f seconds",
+                time.perf_counter() - phase_start,
+            )
 
+        phase_start = time.perf_counter()
         mm_registry = MULTIMODAL_REGISTRY
         self.mm_receiver_cache = mm_registry.engine_receiver_cache_from_config(
             vllm_config
+        )
+        logger.info(
+            "[TIMING] engine.mm_receiver_cache_init: %.6f seconds",
+            time.perf_counter() - phase_start,
         )
 
         # If a KV connector is initialized for scheduler, we want to collect
@@ -162,6 +198,7 @@ class EngineCore:
         # will have the full context
         kv_connector = self.scheduler.get_kv_connector()
         if kv_connector is not None:
+            phase_start = time.perf_counter()
             # Collect and store KV connector xfer metadata from workers
             # (after KV cache registration)
             xfer_handshake_metadata = (
@@ -177,6 +214,10 @@ class EngineCore:
                     if worker_dict is not None:
                         content.update(worker_dict)
                 kv_connector.set_xfer_handshake_metadata(content)
+            logger.info(
+                "[TIMING] engine.kv_connector_handshake: %.6f seconds",
+                time.perf_counter() - phase_start,
+            )
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -224,13 +265,22 @@ class EngineCore:
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()
+        logger.info(
+            "[TIMING] engine.init_total: %.6f seconds",
+            time.perf_counter() - engine_start,
+        )
 
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
         start = time.time()
+        phase_start = time.perf_counter()
 
         # Get all kv cache needed by the model
         kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        logger.info(
+            "[TIMING] engine.kv_cache_specs: %.6f seconds",
+            time.perf_counter() - phase_start,
+        )
 
         has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
         if has_kv_cache:
@@ -244,7 +294,12 @@ class EngineCore:
             else:
                 # Profiles the peak memory usage of the model to determine how
                 # much memory can be allocated for kv cache.
+                phase_start = time.perf_counter()
                 available_gpu_memory = self.model_executor.determine_available_memory()
+                logger.info(
+                    "[TIMING] engine.determine_available_memory: %.6f seconds",
+                    time.perf_counter() - phase_start,
+                )
                 self.available_gpu_memory_for_kv_cache = available_gpu_memory[0]
         else:
             # Attention free models don't need memory for kv cache
@@ -255,8 +310,13 @@ class EngineCore:
         # Track max_model_len before KV cache config to detect auto-fit changes
         max_model_len_before = vllm_config.model_config.max_model_len
 
+        phase_start = time.perf_counter()
         kv_cache_configs = get_kv_cache_configs(
             vllm_config, kv_cache_specs, available_gpu_memory
+        )
+        logger.info(
+            "[TIMING] engine.get_kv_cache_configs: %.6f seconds",
+            time.perf_counter() - phase_start,
         )
 
         # If auto-fit reduced max_model_len, sync the new value to workers.
@@ -264,7 +324,12 @@ class EngineCore:
         # and have the original (larger) max_model_len cached.
         max_model_len_after = vllm_config.model_config.max_model_len
         if max_model_len_after != max_model_len_before:
+            phase_start = time.perf_counter()
             self.collective_rpc("update_max_model_len", args=(max_model_len_after,))
+            logger.info(
+                "[TIMING] engine.update_max_model_len_rpc: %.6f seconds",
+                time.perf_counter() - phase_start,
+            )
 
         scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
         vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
@@ -277,7 +342,12 @@ class EngineCore:
         vllm_config.validate_block_size()
 
         # Initialize kv cache and warmup the execution
+        phase_start = time.perf_counter()
         self.model_executor.initialize_from_config(kv_cache_configs)
+        logger.info(
+            "[TIMING] engine.initialize_from_config: %.6f seconds",
+            time.perf_counter() - phase_start,
+        )
 
         elapsed = time.time() - start
         logger.info_once(

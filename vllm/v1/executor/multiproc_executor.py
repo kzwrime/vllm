@@ -609,6 +609,7 @@ class WorkerProc:
         shared_worker_lock: LockType,
         is_driver_worker: bool,
     ):
+        worker_start = time.perf_counter()
         self.rank = rank
         wrapper = WorkerWrapperBase(rpc_rank=local_rank, global_rank=rank)
         # TODO: move `init_worker` to executor level as a collective rpc call
@@ -623,7 +624,13 @@ class WorkerProc:
             "is_driver_worker": is_driver_worker,
             "shared_worker_lock": shared_worker_lock,
         }
+        phase_start = time.perf_counter()
         wrapper.init_worker(all_kwargs)
+        logger.info(
+            "[TIMING] worker_proc.rank_%d.init_worker: %.6f seconds",
+            rank,
+            time.perf_counter() - phase_start,
+        )
         self.worker = wrapper
 
         self.setup_proc_title_and_log_prefix(
@@ -631,15 +638,27 @@ class WorkerProc:
         )
 
         # Load model
+        phase_start = time.perf_counter()
         self.worker.init_device()
+        logger.info(
+            "[TIMING] worker_proc.rank_%d.init_device: %.6f seconds",
+            rank,
+            time.perf_counter() - phase_start,
+        )
         # Update process title now that parallel groups are initialized
         self.setup_proc_title_and_log_prefix(
             enable_ep=vllm_config.parallel_config.enable_expert_parallel
         )
+        phase_start = time.perf_counter()
         if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             self.worker.elastic_ep_execute("load_model")
         else:
             self.worker.load_model()
+        logger.info(
+            "[TIMING] worker_proc.rank_%d.load_model: %.6f seconds",
+            rank,
+            time.perf_counter() - phase_start,
+        )
 
         scheduler_config = vllm_config.scheduler_config
         self.use_async_scheduling = scheduler_config.async_scheduling
@@ -657,7 +676,18 @@ class WorkerProc:
 
         # Initialize message queues after init_device() since multi-node setups
         # (nnodes_within_dp > 1) require distributed groups to be initialized
+        phase_start = time.perf_counter()
         self._init_message_queues(input_shm_handle, vllm_config)
+        logger.info(
+            "[TIMING] worker_proc.rank_%d.init_message_queues: %.6f seconds",
+            rank,
+            time.perf_counter() - phase_start,
+        )
+        logger.info(
+            "[TIMING] worker_proc.rank_%d.init_total: %.6f seconds",
+            rank,
+            time.perf_counter() - worker_start,
+        )
 
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)

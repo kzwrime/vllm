@@ -268,22 +268,42 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.eplb.prepare_load()
         eplb_models_added = False
         with DeviceMemoryProfiler() as m:
+            phase_start = time.perf_counter()
             model_loader = get_model_loader(self.vllm_config.load_config)
+            logger.info(
+                "[TIMING] model_runner.get_model_loader: %.6f seconds",
+                time.perf_counter() - phase_start,
+            )
             logger.info("Loading model from scratch...")
 
+            phase_start = time.perf_counter()
             self.model = model_loader.load_model(
                 vllm_config=self.vllm_config, model_config=self.vllm_config.model_config
             )
+            logger.info(
+                "[TIMING] model_runner.load_model_weights: %.6f seconds",
+                time.perf_counter() - phase_start,
+            )
             if self.lora_config:
+                phase_start = time.perf_counter()
                 self.model = self.load_lora_model(
                     self.model, self.vllm_config, self.device
+                )
+                logger.info(
+                    "[TIMING] model_runner.load_lora_model: %.6f seconds",
+                    time.perf_counter() - phase_start,
                 )
 
             if self.use_aux_hidden_state_outputs:
                 assert self.speculative_config is not None
                 set_eagle3_aux_hidden_state_layers(self.model, self.speculative_config)
             if self.speculator is not None:
+                phase_start = time.perf_counter()
                 self.speculator.load_model(self.model)
+                logger.info(
+                    "[TIMING] model_runner.speculator_load_model: %.6f seconds",
+                    time.perf_counter() - phase_start,
+                )
                 eplb_models_added = self.eplb.maybe_register_speculator(
                     self.speculator, self.speculative_config, load_dummy_weights
                 )
@@ -297,7 +317,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         if not load_dummy_weights:
+            phase_start = time.perf_counter()
             prepare_communication_buffer_for_model(self.model)
+            logger.info(
+                "[TIMING] model_runner.prepare_communication_buffer: %.6f seconds",
+                time.perf_counter() - phase_start,
+            )
             if self.speculator is not None:
                 prepare_communication_buffer_for_model(self.speculator.model)
 

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+import time
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from functools import cached_property
@@ -43,13 +44,28 @@ class UniProcExecutor(Executor):
                 max_workers=1, thread_name_prefix="WorkerAsyncOutput"
             )
 
+        phase_start = time.perf_counter()
         self.driver_worker.init_worker(all_kwargs=[kwargs])
+        logger.info(
+            "[TIMING] uniproc.init_worker: %.6f seconds",
+            time.perf_counter() - phase_start,
+        )
+        phase_start = time.perf_counter()
         self.driver_worker.init_device()
+        logger.info(
+            "[TIMING] uniproc.init_device: %.6f seconds",
+            time.perf_counter() - phase_start,
+        )
 
+        phase_start = time.perf_counter()
         if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             self.driver_worker.elastic_ep_execute("load_model")
         else:
             self.driver_worker.load_model()
+        logger.info(
+            "[TIMING] uniproc.load_model: %.6f seconds",
+            time.perf_counter() - phase_start,
+        )
         current_platform.update_block_size_for_backend(self.vllm_config)
 
     def _distributed_args(self) -> tuple[str, int, int]:

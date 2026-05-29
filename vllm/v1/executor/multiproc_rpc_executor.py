@@ -16,6 +16,7 @@ Usage (single node, DP=1 TP=2):
 
 import os
 import socket
+import time
 from typing import Any
 
 from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
@@ -208,12 +209,14 @@ def _wait_for_ready_rpc(
     """Receive the READY reply from each worker (via their TCP socket) and
     build WorkerProcHandle objects."""
     logger.info("Waiting for READY replies from %d RPC workers…", len(unready_handles))
+    start = time.perf_counter()
     ready_handles: list[WorkerProcHandle | None] = [None] * len(unready_handles)
 
     for uw in unready_handles:
         rank = uw.rank
         sock = uw.ready_pipe  # type: ignore[assignment]
         assert isinstance(sock, socket.socket), "RPC mode should use socket"
+        rank_start = time.perf_counter()
         try:
             response: dict[str, Any] = sock_recv(sock)  # type: ignore[assignment]
             assert isinstance(response, dict), "Response should be a dict"
@@ -231,6 +234,11 @@ def _wait_for_ready_rpc(
             )
 
         logger.info("Worker rank %d is READY", rank)
+        logger.info(
+            "[TIMING] mp_rpc.wait_ready_rank_%d: %.6f seconds",
+            rank,
+            time.perf_counter() - rank_start,
+        )
         worker_response_mq = MessageQueue.create_from_handle(response["handle"], 0)
         ready_handles[rank % len(ready_handles)] = WorkerProcHandle.from_unready_handle(
             uw,
@@ -238,4 +246,8 @@ def _wait_for_ready_rpc(
             peer_worker_response_mqs=[],  # single-node only for now
         )
 
+    logger.info(
+        "[TIMING] mp_rpc.wait_ready_total: %.6f seconds",
+        time.perf_counter() - start,
+    )
     return ready_handles  # type: ignore[return-value]

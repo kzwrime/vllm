@@ -4,6 +4,7 @@
 
 import gc
 import os
+import time
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from datetime import timedelta
@@ -316,11 +317,16 @@ class Worker(WorkerBase):
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
+        start = time.perf_counter()
         with (
             self._maybe_get_memory_pool_context(tag="weights"),
             set_current_vllm_config(self.vllm_config),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
+        logger.info(
+            "[TIMING] worker.load_model_total: %.6f seconds",
+            time.perf_counter() - start,
+        )
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
@@ -344,7 +350,12 @@ class Worker(WorkerBase):
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
+            profile_start = time.perf_counter()
             self.model_runner.profile_run()
+            logger.info(
+                "[TIMING] worker.profile_run_manual_kv_cache: %.6f seconds",
+                time.perf_counter() - profile_start,
+            )
 
             msg = (
                 f"Initial free memory {format_gib(self.init_snapshot.free_memory)} "
@@ -367,7 +378,12 @@ class Worker(WorkerBase):
             self.init_snapshot,
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
+            profile_start = time.perf_counter()
             self.model_runner.profile_run(skip_compile=True)
+            logger.info(
+                "[TIMING] worker.profile_run_skip_compile: %.6f seconds",
+                time.perf_counter() - profile_start,
+            )
 
             profile_torch_peak = torch.accelerator.memory_stats(self.device).get(
                 "allocated_bytes.all.peak", 0
@@ -378,7 +394,12 @@ class Worker(WorkerBase):
             # differently and can produce incorrect/negative estimates.
             cudagraph_memory_estimate = 0
             if not self.model_config.enforce_eager and not current_platform.is_rocm():
+                cudagraph_profile_start = time.perf_counter()
                 cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
+                logger.info(
+                    "[TIMING] worker.profile_cudagraph_memory: %.6f seconds",
+                    time.perf_counter() - cudagraph_profile_start,
+                )
 
         # Use the pre-cudagraph torch peak to avoid double-counting.
         profile_result.torch_peak_increase = (
@@ -514,6 +535,7 @@ class Worker(WorkerBase):
     @instrument(span_name="Allocate KV cache")
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
+        init_start = time.perf_counter()
 
         # Update local config with adjusted num blocks after profiling,
         # so that it's available to the warmup stage.
@@ -524,8 +546,14 @@ class Worker(WorkerBase):
         # NOTE(Kuntai): This need to be done before `initialize_kv_cache`,
         # because `initialize_kv_cache` will inject kv cache groups not
         # related to kv cache connector (e.g. kv cache sharing layers).
+        phase_start = time.perf_counter()
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+        logger.info(
+            "[TIMING] worker.ensure_kv_transfer_initialized: %.6f seconds",
+            time.perf_counter() - phase_start,
+        )
 
+        phase_start = time.perf_counter()
         if self.vllm_config.model_config.enable_sleep_mode:
             from vllm.device_allocator.cumem import CuMemAllocator
 
@@ -534,9 +562,18 @@ class Worker(WorkerBase):
                 self.model_runner.initialize_kv_cache(kv_cache_config)
         else:
             self.model_runner.initialize_kv_cache(kv_cache_config)
+        logger.info(
+            "[TIMING] worker.initialize_kv_cache: %.6f seconds",
+            time.perf_counter() - phase_start,
+        )
 
         if self.model_config.enable_return_routed_experts:
+            phase_start = time.perf_counter()
             self.model_runner.init_routed_experts_capturer()
+            logger.info(
+                "[TIMING] worker.init_routed_experts_capturer: %.6f seconds",
+                time.perf_counter() - phase_start,
+            )
 
         # Build KV-zero metadata outside the CuMem pool so the bookkeeping
         # GPU tensors (seg_addrs, block-id buffers) use the standard PyTorch
@@ -544,10 +581,20 @@ class Worker(WorkerBase):
         if kv_cache_config.needs_kv_cache_zeroing and hasattr(
             self.model_runner, "_init_kv_zero_meta"
         ):
+            phase_start = time.perf_counter()
             self.model_runner._init_kv_zero_meta()
+            logger.info(
+                "[TIMING] worker.init_kv_zero_meta: %.6f seconds",
+                time.perf_counter() - phase_start,
+            )
+        logger.info(
+            "[TIMING] worker.initialize_from_config_total: %.6f seconds",
+            time.perf_counter() - init_start,
+        )
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> float:
+        warmup_start = time.perf_counter()
         warmup_sizes: list[int] = []
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
@@ -576,21 +623,37 @@ class Worker(WorkerBase):
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
+            phase_start = time.perf_counter()
             self.model_runner._dummy_run(
                 size,
                 skip_eplb=True,
                 remove_lora=False,
                 force_attention=True,
             )
+            logger.info(
+                "[TIMING] worker.compile_dummy_run_size_%d: %.6f seconds",
+                size,
+                time.perf_counter() - phase_start,
+            )
         self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
 
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.
+        phase_start = time.perf_counter()
         kernel_warmup(self)
+        logger.info(
+            "[TIMING] worker.kernel_warmup: %.6f seconds",
+            time.perf_counter() - phase_start,
+        )
 
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
+            phase_start = time.perf_counter()
             cuda_graph_memory_bytes = self.model_runner.capture_model()
+            logger.info(
+                "[TIMING] worker.capture_model: %.6f seconds",
+                time.perf_counter() - phase_start,
+            )
 
         # Compare actual vs estimated CUDA graph memory (if we did profiling)
         if (
@@ -667,7 +730,12 @@ class Worker(WorkerBase):
 
         if self.use_v2_model_runner:
             # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.
+            phase_start = time.perf_counter()
             warmup_kernels(self.model_runner, self.execute_model, self.sample_tokens)
+            logger.info(
+                "[TIMING] worker.v2_warmup_kernels: %.6f seconds",
+                time.perf_counter() - phase_start,
+            )
         elif get_pp_group().is_last_rank:
             # V1: Warm up sampler and preallocate memory buffer for logits and other
             # sampling related tensors of max possible shape to avoid memory
@@ -680,21 +748,40 @@ class Worker(WorkerBase):
             )
 
             # We skip EPLB here since we don't want to record dummy metrics
+            phase_start = time.perf_counter()
             hidden_states, last_hidden_states = self.model_runner._dummy_run(
                 num_tokens=max_num_reqs,
                 skip_eplb=True,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
                 force_attention=True,
             )
+            logger.info(
+                "[TIMING] worker.sampler_dummy_run: %.6f seconds",
+                time.perf_counter() - phase_start,
+            )
             if self.model_runner.is_pooling_model:
+                phase_start = time.perf_counter()
                 self.model_runner._dummy_pooler_run(hidden_states)
+                logger.info(
+                    "[TIMING] worker.dummy_pooler_run: %.6f seconds",
+                    time.perf_counter() - phase_start,
+                )
             else:
+                phase_start = time.perf_counter()
                 self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
+                logger.info(
+                    "[TIMING] worker.dummy_sampler_run: %.6f seconds",
+                    time.perf_counter() - phase_start,
+                )
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
+        logger.info(
+            "[TIMING] worker.compile_or_warm_up_model_total: %.6f seconds",
+            time.perf_counter() - warmup_start,
+        )
         return self.compilation_config.compilation_time
 
     def reset_mm_cache(self) -> None:
