@@ -381,6 +381,12 @@ class ParallelConfig:
                 "data_parallel_external_lb can only be set when data_parallel_size > 1"
             )
 
+        if envs.VLLM_SHARED_EXPERT_DISABLE_TP and not self.enable_expert_parallel:
+            raise ValueError(
+                "VLLM_SHARED_EXPERT_DISABLE_TP=1 requires expert parallelism. "
+                "Enable expert parallelism or unset VLLM_SHARED_EXPERT_DISABLE_TP."
+            )
+
         if self.enable_eplb:
             if not (
                 current_platform.is_cuda_alike() or current_platform.is_out_of_tree()
