@@ -10,7 +10,6 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.triton_utils import tl, triton
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
@@ -80,9 +79,11 @@ class EagleSpeculator:
             device=device,
         )
 
-        self.supports_mm_inputs = MULTIMODAL_REGISTRY.supports_multimodal_inputs(
-            self.draft_model_config
-        )
+        self.supports_mm_inputs = False
+        # Not supported: Qwen3_5MTP has no processor_factory
+        # MULTIMODAL_REGISTRY.supports_multimodal_inputs(
+        #     self.draft_model_config
+        # )
         if self.supports_mm_inputs:
             self.inputs_embeds = torch.zeros(
                 self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
