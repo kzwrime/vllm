@@ -508,6 +508,8 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             z, _ = self.in_proj_z(hidden_states)
             z = z.reshape(z.size(0), -1, self.head_v_dim)
             b, a = ba.chunk(2, dim=-1)
+            b = b.contiguous()
+            a = a.contiguous()
         else:
             mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
             ba, _ = self.in_proj_ba(hidden_states)
@@ -528,34 +530,21 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
                 z = z.reshape(z.size(0), -1, self.head_v_dim)
                 b, a = ba.chunk(2, dim=-1)
+                b = b.contiguous()
+                a = a.contiguous()
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
-        use_decode_only_compile_path = self._should_use_decode_only_compile_path()
-        if not use_decode_only_compile_path:
-            # The generic gdn_attention_core path covers prefill, speculative
-            # decode, and other backend cases; keep its historical contiguous
-            # b/a contract. The decode-only compile path calls the torch_xcpu
-            # custom op directly, whose Python checks and C++ implementation
-            # accept strided rows and use the tensors' actual strides.
-            b = b.contiguous()
-            a = a.contiguous()
-
-        # Keep zero-initialization for the generic path; some padded/token-tail
-        # positions may not be written by _forward_core. The decode-only compile
-        # custom op clears core_attn_out internally, so using empty there avoids
-        # an Inductor-generated zero-fill kernel without changing semantics.
-        core_attn_out_factory = (
-            torch.empty if use_decode_only_compile_path else torch.zeros
-        )
-        core_attn_out = core_attn_out_factory(
+        # Note: we should not use torch.empty here like other attention backends,
+        # see discussions in https://github.com/vllm-project/vllm/pull/28182
+        core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
 
-        if use_decode_only_compile_path:
+        if self._should_use_decode_only_compile_path():
             self._forward_core_decode_non_spec_compile(
                 mixed_qkv=mixed_qkv,
                 b=b,
@@ -574,26 +563,12 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        if (
-            core_attn_out.dim() != 3
-            or z.dim() != 3
-            or core_attn_out.shape != z.shape
-            or core_attn_out.shape[1] != self.num_v_heads // self.tp_size
-            or core_attn_out.shape[2] != self.head_v_dim
-            or core_attn_out.stride(-1) != 1
-            or z.stride(-1) != 1
-        ):
-            raise RuntimeError(
-                "GDN RMSNormGated expects core_attn_out and z with shape "
-                "[tokens, local value heads, value head dim] and contiguous "
-                "last dimension."
-            )
-        # Keep the per-head layout for gated RMSNorm. The native implementation
-        # normalizes over the last dimension, and the XCPU kernel accepts this
-        # 3D layout as long as each row's last dimension is contiguous. Flattening
-        # the strided z view early would force Inductor to materialize a clone
-        # before rms_norm_gated.
+        z_shape_og = z.shape
+        # Reshape input data into 2D tensor
+        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
+        z = z.reshape(-1, z.shape[-1])
         core_attn_out = self.norm(core_attn_out, z)
+        core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         output[:num_tokens], _ = self.out_proj(core_attn_out)
 
@@ -631,35 +606,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 "XCPU GDN decode-only compile path for vLLM 0.19.0 requires "
                 "a registered Mamba cache handle. Disable it with "
                 "VLLM_XCPU_GDN_DECODE_ONLY_COMPILE=0."
-            )
-        expected_v_heads = self.num_v_heads // self.tp_size
-        if mixed_qkv.dim() != 2 or mixed_qkv.stride(-1) != 1:
-            raise RuntimeError(
-                "XCPU GDN decode-only compile path requires a 2D mixed_qkv "
-                "tensor with contiguous last dimension."
-            )
-        if b.dim() != 2 or a.dim() != 2 or b.shape != a.shape:
-            raise RuntimeError(
-                "XCPU GDN decode-only compile path requires matching 2D b/a tensors."
-            )
-        if b.stride(-1) != 1 or a.stride(-1) != 1:
-            raise RuntimeError(
-                "XCPU GDN decode-only compile path requires b/a tensors with "
-                "contiguous last dimension."
-            )
-        if b.shape[-1] != expected_v_heads:
-            raise RuntimeError(
-                "XCPU GDN decode-only compile path requires b/a last dimension "
-                f"to equal local value heads ({expected_v_heads})."
-            )
-        if (
-            core_attn_out.dim() != 3
-            or core_attn_out.shape[1] != expected_v_heads
-            or core_attn_out.shape[2] != self.head_v_dim
-        ):
-            raise RuntimeError(
-                "XCPU GDN decode-only compile path requires core_attn_out with "
-                "shape [tokens, local value heads, value head dim]."
             )
 
         # vLLM 0.19.0-specific decode-only compile path. Keep the Python side
