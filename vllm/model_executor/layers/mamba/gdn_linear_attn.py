@@ -508,8 +508,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             z, _ = self.in_proj_z(hidden_states)
             z = z.reshape(z.size(0), -1, self.head_v_dim)
             b, a = ba.chunk(2, dim=-1)
-            b = b.contiguous()
-            a = a.contiguous()
         else:
             mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
             ba, _ = self.in_proj_ba(hidden_states)
@@ -530,15 +528,11 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 mixed_qkv, z = mixed_qkvz.split([qkv_size, z_size], dim=-1)
                 z = z.reshape(z.size(0), -1, self.head_v_dim)
                 b, a = ba.chunk(2, dim=-1)
-                b = b.contiguous()
-                a = a.contiguous()
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
-        # Note: we should not use torch.empty here like other attention backends,
-        # see discussions in https://github.com/vllm-project/vllm/pull/28182
-        core_attn_out = torch.zeros(
+        core_attn_out = torch.empty(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
@@ -692,11 +686,15 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             # V1 profile run — warm up prefill kernels so that
             # autotuning completes before KV cache allocation.
             self._warmup_prefill_kernels(mixed_qkv)
+            core_attn_out.zero_()
             return
 
         assert isinstance(attn_metadata, dict)
         attn_metadata = attn_metadata[self.prefix]
         assert isinstance(attn_metadata, GDNAttentionMetadata)
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        if num_actual_tokens < core_attn_out.size(0):
+            core_attn_out[num_actual_tokens:].zero_()
 
         if (
             self.enable_packed_recurrent_decode
@@ -712,6 +710,9 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 attn_metadata=attn_metadata,
             )
 
+        b = b.contiguous()
+        a = a.contiguous()
+
         has_initial_state = attn_metadata.has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc
         non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
@@ -723,7 +724,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         self_kv_cache = self.kv_cache
         conv_state = self_kv_cache[0].transpose(-1, -2)
         ssm_state = self_kv_cache[1]
-        num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
