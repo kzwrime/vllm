@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import csv
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -185,6 +184,7 @@ class TorchProfilerWrapper(WorkerProfiler):
         self.worker_name = worker_name
         self.local_rank = local_rank
         self.profiler_config = profiler_config
+        self.activities = activities
         torch_profiler_trace_dir = profiler_config.torch_profiler_dir
         if local_rank in (None, 0):
             logger.info_once(
@@ -294,23 +294,14 @@ class TorchProfilerWrapper(WorkerProfiler):
             profiler_out_file = (
                 f"{profiler_dir}/{self.worker_name}-{ts}-profiler_out.txt"
             )
-            sort_key = "self_cpu_time_total"
+            if "PrivateUse1" in self.activities:
+                sort_key = "self_privateuse1_time_total"
+            else:
+                sort_key = "self_cpu_time_total"
             table = self.profiler.key_averages().table(sort_by=sort_key)
 
             with open(profiler_out_file, "w") as f:
                 print(table, file=f)
-
-            key_averages_events = self.profiler.key_averages()
-            profiler_csv_file = (
-                f"{profiler_dir}/{self.worker_name}-{ts}-profiler_out.csv"
-            )
-            headers = list(vars(key_averages_events[0]).keys())
-
-            with open(profiler_csv_file, "w", newline="") as csvfile:
-                writer = csv.writer(csvfile)
-                writer.writerow(headers)
-                for event in key_averages_events:
-                    writer.writerow(vars(event).values())
 
         if self.dump_cpu_time_total and rank == 0:
             logger.info(
