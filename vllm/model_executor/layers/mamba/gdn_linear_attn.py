@@ -710,9 +710,6 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 attn_metadata=attn_metadata,
             )
 
-        b = b.contiguous()
-        a = a.contiguous()
-
         has_initial_state = attn_metadata.has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc
         non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
@@ -729,6 +726,8 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
+        a_recurrent = None
+        b_recurrent = None
 
         # 1. Convolution sequence transformation
         conv_weights = self.conv1d.weight.view(
@@ -817,11 +816,14 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
         # 2.1: Process the multi-query part
         if spec_sequence_masks is not None:
+            if a_recurrent is None or b_recurrent is None:
+                a_recurrent = a.contiguous()
+                b_recurrent = b.contiguous()
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
-                    a=a,
-                    b=b,
+                    a=a_recurrent,
+                    b=b_recurrent,
                     dt_bias=self.dt_bias,
                     q=query_spec,
                     k=key_spec,
@@ -862,11 +864,14 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 ssm_state.dtype
             )
         elif attn_metadata.num_decodes > 0:
+            if a_recurrent is None or b_recurrent is None:
+                a_recurrent = a.contiguous()
+                b_recurrent = b.contiguous()
             core_attn_out_non_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
-                    a=a,
-                    b=b,
+                    a=a_recurrent,
+                    b=b_recurrent,
                     dt_bias=self.dt_bias,
                     q=query_non_spec,
                     k=key_non_spec,
@@ -911,10 +916,34 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         """
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
         self_kv_cache = self.kv_cache
-        conv_state = self_kv_cache[0].transpose(-1, -2)
-        ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
 
+        ssm_state = self_kv_cache[1]
+
+        if mixed_qkv.device.type == "mcpu":
+            import torch_xcpu  # noqa: F401
+
+            torch.ops.torch_xcpu.gdn_decode_non_spec(
+                core_attn_out,
+                self_kv_cache[0],
+                ssm_state,
+                mixed_qkv,
+                b,
+                a,
+                self.conv1d.weight,
+                self.conv1d.bias,
+                non_spec_state_indices_tensor,
+                self.A_log,
+                self.dt_bias,
+                num_actual_tokens,
+                self.head_k_dim**-0.5,
+                self.activation in ("silu", "swish"),
+                True,
+                20.0,
+            )
+            return
+
+        conv_state = self_kv_cache[0].transpose(-1, -2)
         mixed_qkv = mixed_qkv[:num_actual_tokens]
         b = b[:num_actual_tokens]
         a = a[:num_actual_tokens]
