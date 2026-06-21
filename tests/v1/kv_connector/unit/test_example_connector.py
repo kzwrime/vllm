@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from types import SimpleNamespace
 from typing import NamedTuple
 
 import pytest
@@ -8,8 +9,18 @@ from PIL import Image
 from vllm import LLM, SamplingParams
 from vllm.assets.image import ImageAsset
 from vllm.config import AttentionConfig, KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
+    ExampleConnector,
+    ReqMeta,
+)
 from vllm.multimodal.utils import encode_image_url
 from vllm.platforms import current_platform
+from vllm.v1.core.sched.output import (
+    CachedRequestData,
+    NewRequestData,
+    SchedulerOutput,
+)
 
 MODEL_NAME = "RedHatAI/Qwen2.5-VL-3B-Instruct-quantized.w8a8"
 
@@ -19,6 +30,142 @@ TEXT_PROMPTS = [
     "What's in the image(s)? Around 30 words. What's special in 2nd image?",
     "The future of AI is",
 ]
+
+
+def test_req_meta_caps_tokens_to_allocated_blocks():
+    token_ids = list(range(704))
+    block_ids = list(range(16))
+    block_size = 16
+
+    meta = ReqMeta.make_meta(
+        token_ids=token_ids,
+        block_ids=block_ids,
+        block_size=block_size,
+        is_store=True,
+        mm_hashes=[],
+    )
+
+    assert len(meta.token_ids) == 256
+    assert len(meta.slot_mapping) == 256
+    assert meta.token_ids.tolist() == token_ids[:256]
+    assert meta.slot_mapping.tolist() == list(range(256))
+
+
+def test_example_connector_publishes_only_complete_prefill(tmp_path):
+    block_size = 16
+    prompt_token_ids = list(range(704))
+    connector = ExampleConnector(
+        SimpleNamespace(
+            cache_config=SimpleNamespace(block_size=block_size),
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="ExampleConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
+            ),
+        ),
+        KVConnectorRole.SCHEDULER,
+    )
+
+    first_chunk = SchedulerOutput.make_empty()
+    first_chunk.scheduled_new_reqs = [
+        NewRequestData(
+            req_id="req-0",
+            prompt_token_ids=prompt_token_ids,
+            mm_features=[],
+            sampling_params=None,
+            pooling_params=None,
+            block_ids=(list(range(16)),),
+            num_computed_tokens=0,
+            lora_request=None,
+        )
+    ]
+    first_chunk.num_scheduled_tokens = {"req-0": 256}
+    assert connector.build_connector_meta(first_chunk).requests == []
+
+    second_chunk = SchedulerOutput.make_empty()
+    second_chunk.scheduled_cached_reqs = CachedRequestData(
+        req_ids=["req-0"],
+        resumed_req_ids=set(),
+        new_token_ids=[],
+        all_token_ids={},
+        new_block_ids=[(list(range(16, 32)),)],
+        num_computed_tokens=[256],
+        num_output_tokens=[0],
+    )
+    second_chunk.num_scheduled_tokens = {"req-0": 256}
+    assert connector.build_connector_meta(second_chunk).requests == []
+
+    final_chunk = SchedulerOutput.make_empty()
+    final_chunk.scheduled_cached_reqs = CachedRequestData(
+        req_ids=["req-0"],
+        resumed_req_ids=set(),
+        new_token_ids=[],
+        all_token_ids={},
+        new_block_ids=[(list(range(32, 44)),)],
+        num_computed_tokens=[512],
+        num_output_tokens=[0],
+    )
+    final_chunk.num_scheduled_tokens = {"req-0": 192}
+
+    meta = connector.build_connector_meta(final_chunk)
+    assert len(meta.requests) == 1
+    request_meta = meta.requests[0]
+    assert request_meta.is_store
+    assert len(request_meta.token_ids) == 704
+    assert len(request_meta.slot_mapping) == 704
+    assert request_meta.token_ids.tolist() == prompt_token_ids
+
+
+def test_example_connector_replaces_blocks_on_resume(tmp_path):
+    block_size = 16
+    prompt_token_ids = list(range(704))
+    connector = ExampleConnector(
+        SimpleNamespace(
+            cache_config=SimpleNamespace(block_size=block_size),
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="ExampleConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
+            ),
+        ),
+        KVConnectorRole.SCHEDULER,
+    )
+
+    first_chunk = SchedulerOutput.make_empty()
+    first_chunk.scheduled_new_reqs = [
+        NewRequestData(
+            req_id="req-0",
+            prompt_token_ids=prompt_token_ids,
+            mm_features=[],
+            sampling_params=None,
+            pooling_params=None,
+            block_ids=(list(range(16)),),
+            num_computed_tokens=0,
+            lora_request=None,
+        )
+    ]
+    first_chunk.num_scheduled_tokens = {"req-0": 256}
+    assert connector.build_connector_meta(first_chunk).requests == []
+
+    resumed_chunk = SchedulerOutput.make_empty()
+    resumed_chunk.scheduled_cached_reqs = CachedRequestData(
+        req_ids=["req-0"],
+        resumed_req_ids={"req-0"},
+        new_token_ids=[],
+        all_token_ids={},
+        new_block_ids=[(list(range(100, 144)),)],
+        num_computed_tokens=[256],
+        num_output_tokens=[0],
+    )
+    resumed_chunk.num_scheduled_tokens = {"req-0": 448}
+
+    meta = connector.build_connector_meta(resumed_chunk)
+    assert len(meta.requests) == 1
+    request_meta = meta.requests[0]
+    assert request_meta.is_store
+    assert len(request_meta.token_ids) == 704
+    assert request_meta.slot_mapping[:16].tolist() == list(range(1600, 1616))
+    assert request_meta.slot_mapping[-16:].tolist() == list(range(2288, 2304))
 
 
 class InputCase(NamedTuple):

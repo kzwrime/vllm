@@ -49,7 +49,13 @@ class ReqMeta:
         is_store: bool,
         mm_hashes: list[str],
     ) -> "ReqMeta":
-        valid_num_tokens = align_to_block_size(len(token_ids), block_size)
+        # A scheduler step can allocate fewer blocks than the full prompt
+        # length, for example with chunked prefill. Keep the cache key and
+        # slot mapping limited to KV that exists for this step.
+        valid_num_tokens = min(
+            align_to_block_size(len(token_ids), block_size),
+            len(block_ids) * block_size,
+        )
         token_ids_tensor = torch.tensor(token_ids)[:valid_num_tokens]
         block_ids_tensor = torch.tensor(block_ids)
         num_blocks = block_ids_tensor.shape[0]
@@ -103,6 +109,9 @@ class ExampleConnector(KVConnectorBase_V1, SupportsHMA):
         )
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, tuple[Request, int]] = {}
+        self._requests_need_store: dict[
+            str, tuple[list[int], list[str], list[int]]
+        ] = {}
         self._matched_num_tokens: dict[str, int] = {}
         self._pending_metadata: dict[str, tuple[torch.Tensor, list[str]]] = {}
         self._storage_path = self._kv_transfer_config.get_from_extra_config(
@@ -273,6 +282,9 @@ class ExampleConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
+        self._requests_need_store.pop(request.request_id, None)
+        self._requests_need_load.pop(request.request_id, None)
+        self._matched_num_tokens.pop(request.request_id, None)
         return False, None
 
     def get_num_new_matched_tokens(
@@ -364,44 +376,82 @@ class ExampleConnector(KVConnectorBase_V1, SupportsHMA):
                 # NOTE(rob): for this debug implementation, we only cache
                 # the original prompt tokens.
                 if not self._found_match_for_prompt(token_ids, mm_hashes):
-                    meta.add_request(
-                        token_ids=token_ids,
-                        block_ids=new_req.block_ids[0],
-                        block_size=self._block_size,
-                        is_store=True,
-                        mm_hashes=mm_hashes,
+                    num_cache_tokens = align_to_block_size(
+                        len(token_ids), self._block_size
                     )
+                    if num_cache_tokens > 0:
+                        block_ids = list(new_req.block_ids[0])
+                        num_available_tokens = (
+                            new_req.num_computed_tokens
+                            + scheduler_output.num_scheduled_tokens[new_req.req_id]
+                        )
+                        if num_available_tokens >= num_cache_tokens:
+                            meta.add_request(
+                                token_ids=token_ids[:num_cache_tokens],
+                                block_ids=block_ids,
+                                block_size=self._block_size,
+                                is_store=True,
+                                mm_hashes=mm_hashes,
+                            )
+                        else:
+                            self._requests_need_store[new_req.req_id] = (
+                                list(token_ids),
+                                mm_hashes,
+                                block_ids,
+                            )
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(cached_reqs.req_ids):
             resumed_from_preemption = req_id in cached_reqs.resumed_req_ids
-            if not resumed_from_preemption or req_id not in self._requests_need_load:
-                continue
-
+            new_block_ids = cached_reqs.new_block_ids[i]
             num_computed_tokens = cached_reqs.num_computed_tokens[i]
             num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            new_block_ids = cached_reqs.new_block_ids[i]
 
-            # NOTE(rob): cached_req_data does not have the full
-            # list of token ids (only new tokens). So we look it
-            # up in the actual request object.
-            request, num_matched_tokens = self._requests_need_load[req_id]
-            total_tokens = num_computed_tokens + num_new_tokens
-            token_ids = request.all_token_ids[:total_tokens]
+            if resumed_from_preemption and req_id in self._requests_need_load:
+                # NOTE(rob): cached_req_data does not have the full
+                # list of token ids (only new tokens). So we look it
+                # up in the actual request object.
+                request, num_matched_tokens = self._requests_need_load[req_id]
+                total_tokens = num_computed_tokens + num_new_tokens
 
-            # NOTE(rob): For resumed req, new_block_ids is all
-            # of the block_ids for the request.
-            assert new_block_ids is not None
-            block_ids = new_block_ids[0]
+                token_ids = request.all_token_ids[:total_tokens]
 
-            meta.add_request(
-                token_ids=token_ids[:num_matched_tokens],
-                block_ids=block_ids,
-                block_size=self._block_size,
-                is_store=False,
-                mm_hashes=[f.identifier for f in request.mm_features],
-            )
-            total_need_load += 1
+                # NOTE(rob): For resumed req, new_block_ids is all
+                # of the block_ids for the request.
+                assert new_block_ids is not None
+                block_ids = new_block_ids[0]
+
+                meta.add_request(
+                    token_ids=token_ids[:num_matched_tokens],
+                    block_ids=block_ids,
+                    block_size=self._block_size,
+                    is_store=False,
+                    mm_hashes=[f.identifier for f in request.mm_features],
+                )
+                total_need_load += 1
+
+            if req_id not in self._requests_need_store:
+                continue
+
+            token_ids, mm_hashes, block_ids = self._requests_need_store[req_id]
+            if new_block_ids is not None:
+                if resumed_from_preemption:
+                    block_ids = list(new_block_ids[0])
+                else:
+                    block_ids.extend(new_block_ids[0])
+            num_cache_tokens = align_to_block_size(len(token_ids), self._block_size)
+            num_available_tokens = num_computed_tokens + num_new_tokens
+            if num_available_tokens >= num_cache_tokens:
+                meta.add_request(
+                    token_ids=token_ids[:num_cache_tokens],
+                    block_ids=block_ids,
+                    block_size=self._block_size,
+                    is_store=True,
+                    mm_hashes=mm_hashes,
+                )
+                self._requests_need_store.pop(req_id)
+            else:
+                self._requests_need_store[req_id] = (token_ids, mm_hashes, block_ids)
 
         assert total_need_load == len(self._requests_need_load)
         self._requests_need_load.clear()
