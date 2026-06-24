@@ -927,6 +927,8 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
             pinned.copy_(cpu_tensor)
             return torch.ops._C.get_xpu_view_from_cpu_tensor(pinned)
         return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
+    elif current_platform.device_name == "mcpu":
+        return torch.mcpu.get_mcpu_view_from_cpu_tensor(cpu_tensor)
     elif current_platform.is_cuda_alike():
         return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
     else:
