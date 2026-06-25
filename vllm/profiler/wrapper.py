@@ -10,6 +10,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from glob import glob
+from time import time_ns
 from uuid import uuid4
 
 import torch
@@ -380,6 +381,12 @@ class TorchProfilerWrapper(WorkerProfiler):
                 profiler_dir, f"{self._worker_name}.profiler_out.txt"
             )
             with open(profiler_out_file, "w") as f:
+                print(table, file=f)
+            timestamped_out_file = os.path.join(
+                profiler_dir,
+                f"{self._worker_name}-{time_ns()}-{uuid4().hex}-profiler_out.txt",
+            )
+            with open(timestamped_out_file, "w") as f:
                 print(table, file=f)
 
     def _maybe_add_version_metadata(self) -> None:
