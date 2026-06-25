@@ -58,6 +58,28 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
     assert cfg.scheduler_config.async_scheduling is True
 
 
+def test_shared_expert_disable_tp_allows_default_vllm_config(monkeypatch):
+    monkeypatch.setenv("VLLM_SHARED_EXPERT_DISABLE_TP", "1")
+
+    cfg = VllmConfig()
+
+    assert cfg.parallel_config.is_moe_model is None
+    assert cfg.parallel_config.enable_expert_parallel is False
+
+
+def test_shared_expert_disable_tp_requires_ep_for_moe(monkeypatch):
+    monkeypatch.setenv("VLLM_SHARED_EXPERT_DISABLE_TP", "1")
+
+    with pytest.raises(
+        ValidationError,
+        match="VLLM_SHARED_EXPERT_DISABLE_TP=1 requires expert parallelism",
+    ):
+        ParallelConfig(is_moe_model=True)
+
+    cfg = ParallelConfig(is_moe_model=True, enable_expert_parallel=True)
+    assert cfg.enable_expert_parallel is True
+
+
 @dataclass
 class _TestConfigFields:
     a: int

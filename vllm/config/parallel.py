@@ -381,7 +381,11 @@ class ParallelConfig:
                 "data_parallel_external_lb can only be set when data_parallel_size > 1"
             )
 
-        if envs.VLLM_SHARED_EXPERT_DISABLE_TP and not self.enable_expert_parallel:
+        if (
+            envs.VLLM_SHARED_EXPERT_DISABLE_TP
+            and self.is_moe_model is True
+            and not self.enable_expert_parallel
+        ):
             raise ValueError(
                 "VLLM_SHARED_EXPERT_DISABLE_TP=1 requires expert parallelism. "
                 "Enable expert parallelism or unset VLLM_SHARED_EXPERT_DISABLE_TP."
