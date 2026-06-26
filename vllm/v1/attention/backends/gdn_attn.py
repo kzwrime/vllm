@@ -41,6 +41,7 @@ class GDNAttentionMetadata:
     num_spec_decodes: int
     num_spec_decode_tokens: int
     num_actual_tokens: int
+    num_actual_tokens_cpu: torch.Tensor | None = None
 
     has_initial_state: torch.Tensor | None = None
 
@@ -400,6 +401,9 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_spec_decodes=num_spec_decodes,
             num_spec_decode_tokens=num_spec_decode_tokens,
             num_actual_tokens=m.num_actual_tokens,
+            num_actual_tokens_cpu=torch.tensor(
+                [m.num_actual_tokens], dtype=torch.int64, device="cpu"
+            ),
             has_initial_state=has_initial_state,
             spec_query_start_loc=spec_query_start_loc,
             non_spec_query_start_loc=non_spec_query_start_loc,

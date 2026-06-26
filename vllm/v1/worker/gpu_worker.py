@@ -1007,6 +1007,10 @@ class Worker(WorkerBase):
         torch.accelerator.synchronize()
 
     def shutdown(self) -> None:
+        if envs.VLLM_XCPU_GDN_DECODE_ONLY_COMPILE:
+            import torch_xcpu.ops_defs.gdn_decode_state  # noqa: F401
+
+            torch.ops.torch_xcpu.clear_gdn_decode_states()
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
