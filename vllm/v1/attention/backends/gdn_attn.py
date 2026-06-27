@@ -42,6 +42,7 @@ class GDNAttentionMetadata:
     num_spec_decode_tokens: int
     num_actual_tokens: int
     num_actual_tokens_cpu: torch.Tensor | None = None
+    enable_gdn_decode_non_spec_direct_call: torch.Tensor | None = None
 
     has_initial_state: torch.Tensor | None = None
 
@@ -393,6 +394,13 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
+        enable_gdn_decode_non_spec_direct_call = (
+            num_prefills == 0
+            and num_decodes > 0
+            and num_spec_decodes == 0
+            and spec_sequence_masks is None
+        )
+
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -403,6 +411,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_actual_tokens=m.num_actual_tokens,
             num_actual_tokens_cpu=torch.tensor(
                 [m.num_actual_tokens], dtype=torch.int64, device="cpu"
+            ),
+            enable_gdn_decode_non_spec_direct_call=torch.tensor(
+                enable_gdn_decode_non_spec_direct_call,
+                dtype=torch.bool,
+                device="cpu",
             ),
             has_initial_state=has_initial_state,
             spec_query_start_loc=spec_query_start_loc,

@@ -47,32 +47,6 @@ IGNORE_COMPILE_KEY = "_ignore_compile_vllm"
 _T = TypeVar("_T", bound=nn.Module)
 
 
-def _should_eager_for_xcpu_gdn_prefill_mixed() -> bool:
-    """Keep GDN prefill/mixed forwards out of the single no-guard trace."""
-    if not envs.VLLM_XCPU_GDN_DECODE_ONLY_COMPILE:
-        return False
-    if not is_forward_context_available():
-        return False
-    attn_metadata = get_forward_context().attn_metadata
-    if not isinstance(attn_metadata, dict):
-        return False
-
-    from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
-
-    for metadata in attn_metadata.values():
-        if not isinstance(metadata, GDNAttentionMetadata):
-            continue
-        if not envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE:
-            return True
-        if not (
-            metadata.num_prefills == 0
-            and metadata.num_decodes > 0
-            and metadata.spec_sequence_masks is None
-        ):
-            return True
-    return False
-
-
 def should_torch_compile_mm_encoder(vllm_config: VllmConfig) -> bool:
     """Callable to be passed to `@support_torch_compile`'s `enable_if` argument."""
     return vllm_config.compilation_config.compile_mm_encoder
@@ -475,9 +449,6 @@ def _support_torch_compile(
         # e.g. TPU has the compilation logic in model runner, so we don't
         # need to compile the model inside.
         if self.do_not_compile or torch.compiler.is_compiling():
-            return self.forward(*args, **kwargs)
-
-        if _should_eager_for_xcpu_gdn_prefill_mixed():
             return self.forward(*args, **kwargs)
 
         # If skip_compiled is set, bypass compiled model call. This is used e.g. for

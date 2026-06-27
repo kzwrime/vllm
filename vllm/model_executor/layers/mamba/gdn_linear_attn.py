@@ -532,25 +532,21 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
-        core_attn_out = torch.empty(
-            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
+        enable_gdn_decode_non_spec_direct_call = (
+            self._gdn_decode_non_spec_direct_call_predicate()
         )
-
-        if self._should_use_decode_only_compile_path():
-            self._forward_core_decode_non_spec_compile(
-                mixed_qkv=mixed_qkv,
-                b=b,
-                a=a,
-                core_attn_out=core_attn_out,
+        if enable_gdn_decode_non_spec_direct_call is not None:
+            core_attn_out = torch.cond(
+                enable_gdn_decode_non_spec_direct_call,
+                self._forward_core_decode_non_spec_compile_out,
+                self._forward_core_python_callback_out,
+                [mixed_qkv, ba],
             )
         else:
-            torch.ops.vllm.gdn_attention_core(
+            core_attn_out = torch.ops.vllm.gdn_attention_core(
                 mixed_qkv,
                 b,
                 a,
-                core_attn_out,
                 self.prefix,
             )
 
@@ -580,22 +576,77 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
         output[:num_tokens], _ = self.out_proj(core_attn_out)
 
-    def _should_use_decode_only_compile_path(self) -> bool:
-        if not envs.VLLM_XCPU_GDN_DECODE_ONLY_COMPILE:
-            return False
+    def _empty_core_attn_out(self, mixed_qkv: torch.Tensor) -> torch.Tensor:
+        return torch.empty(
+            (
+                mixed_qkv.size(0),
+                self.num_v_heads // self.tp_size,
+                self.head_v_dim,
+            ),
+            dtype=mixed_qkv.dtype,
+            device=mixed_qkv.device,
+        )
+
+    def _gdn_decode_non_spec_direct_call_predicate(self) -> torch.Tensor | None:
+        if (
+            not envs.VLLM_XCPU_GDN_DECODE_ONLY_COMPILE
+            or not envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
+            or not self.enable_packed_recurrent_decode
+        ):
+            return None
         forward_context = get_forward_context()
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
         if not isinstance(attn_metadata, dict):
-            return False
+            return None
         attn_metadata_i = attn_metadata.get(self.prefix)
         if not isinstance(attn_metadata_i, GDNAttentionMetadata):
-            return False
-        return (
-            self.enable_packed_recurrent_decode
-            and attn_metadata_i.spec_sequence_masks is None
-            and attn_metadata_i.num_prefills == 0
-            and attn_metadata_i.num_decodes > 0
+            return None
+        enable_gdn_decode_non_spec_direct_call = (
+            attn_metadata_i.enable_gdn_decode_non_spec_direct_call
         )
+        if enable_gdn_decode_non_spec_direct_call is None:
+            return None
+        return enable_gdn_decode_non_spec_direct_call
+
+    def _split_ba_for_core(self, ba: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.gqa_interleaved_layout:
+            split_arg_list_ba = [
+                self.num_v_heads // self.num_k_heads,
+                self.num_v_heads // self.num_k_heads,
+            ]
+            b, a = torch.split(ba, split_arg_list_ba, dim=2)
+            b = b.reshape(b.size(0), self.num_v_heads // self.tp_size)
+            a = a.reshape(a.size(0), self.num_v_heads // self.tp_size)
+            return b, a
+        return ba.chunk(2, dim=-1)
+
+    def _forward_core_python_callback_out(
+        self,
+        mixed_qkv: torch.Tensor,
+        ba: torch.Tensor,
+    ) -> torch.Tensor:
+        b, a = self._split_ba_for_core(ba)
+        return torch.ops.vllm.gdn_attention_core(
+            mixed_qkv,
+            b,
+            a,
+            self.prefix,
+        )
+
+    def _forward_core_decode_non_spec_compile_out(
+        self,
+        mixed_qkv: torch.Tensor,
+        ba: torch.Tensor,
+    ) -> torch.Tensor:
+        b, a = self._split_ba_for_core(ba)
+        core_attn_out = self._empty_core_attn_out(mixed_qkv)
+        self._forward_core_decode_non_spec_compile(
+            mixed_qkv=mixed_qkv,
+            b=b,
+            a=a,
+            core_attn_out=core_attn_out,
+        )
+        return core_attn_out
 
     def _forward_core_decode_non_spec_compile(
         self,
@@ -1061,9 +1112,8 @@ def gdn_attention_core(
     mixed_qkv: torch.Tensor,
     b: torch.Tensor,
     a: torch.Tensor,
-    core_attn_out: torch.Tensor,
     layer_name: str,
-) -> None:
+) -> torch.Tensor:
     """
     Custom op for the core attention computation.
     Only handles the convolution + recurrent attention part.
@@ -1071,29 +1121,46 @@ def gdn_attention_core(
     """
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
+    core_attn_out = torch.empty(
+        (
+            mixed_qkv.size(0),
+            self.num_v_heads // self.tp_size,
+            self.head_v_dim,
+        ),
+        dtype=mixed_qkv.dtype,
+        device=mixed_qkv.device,
+    )
     self._forward_core(
         mixed_qkv=mixed_qkv,
         b=b,
         a=a,
         core_attn_out=core_attn_out,
     )
+    return core_attn_out
 
 
 def gdn_attention_core_fake(
     mixed_qkv: torch.Tensor,
     b: torch.Tensor,
     a: torch.Tensor,
-    core_attn_out: torch.Tensor,
     layer_name: str,
-) -> None:
-    """Fake implementation for torch.compile."""
-    return
+) -> torch.Tensor:
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    return torch.empty(
+        (
+            mixed_qkv.size(0),
+            self.num_v_heads // self.tp_size,
+            self.head_v_dim,
+        ),
+        dtype=mixed_qkv.dtype,
+        device=mixed_qkv.device,
+    )
 
 
 direct_register_custom_op(
     op_name="gdn_attention_core",
     op_func=gdn_attention_core,
-    mutates_args=["core_attn_out"],
     fake_impl=gdn_attention_core_fake,
 )
 
