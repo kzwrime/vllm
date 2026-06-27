@@ -7,7 +7,7 @@ import inspect
 import os
 import sys
 from collections.abc import Callable, Generator
-from typing import TYPE_CHECKING, Any, TypeVar, overload
+from typing import TYPE_CHECKING, Any, TypeVar, cast, overload
 from unittest.mock import patch
 
 import torch
@@ -47,30 +47,35 @@ IGNORE_COMPILE_KEY = "_ignore_compile_vllm"
 _T = TypeVar("_T", bound=nn.Module)
 
 
-def _should_eager_for_xcpu_gdn_prefill_mixed() -> bool:
-    """Keep GDN prefill/mixed forwards out of the single no-guard trace."""
+def _xcpu_gdn_compile_variant_key() -> str | None:
+    """Return the GDN batch kind that needs its own no-guard compile artifact."""
     if not envs.VLLM_XCPU_GDN_DECODE_ONLY_COMPILE:
-        return False
+        return None
     if not is_forward_context_available():
-        return False
+        return None
     attn_metadata = get_forward_context().attn_metadata
     if not isinstance(attn_metadata, dict):
-        return False
+        return None
 
     from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
+    has_gdn_metadata = False
     for metadata in attn_metadata.values():
         if not isinstance(metadata, GDNAttentionMetadata):
             continue
+        has_gdn_metadata = True
         if not envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE:
-            return True
+            return "xcpu_gdn_python_callback"
         if not (
             metadata.num_prefills == 0
             and metadata.num_decodes > 0
             and metadata.spec_sequence_masks is None
         ):
-            return True
-    return False
+            return "xcpu_gdn_python_callback"
+
+    if not has_gdn_metadata:
+        return None
+    return "xcpu_gdn_decode_non_spec_direct"
 
 
 def should_torch_compile_mm_encoder(vllm_config: VllmConfig) -> bool:
@@ -477,14 +482,19 @@ def _support_torch_compile(
         if self.do_not_compile or torch.compiler.is_compiling():
             return self.forward(*args, **kwargs)
 
-        if _should_eager_for_xcpu_gdn_prefill_mixed():
-            return self.forward(*args, **kwargs)
-
         # If skip_compiled is set, bypass compiled model call. This is used e.g. for
         # enc-dec models where tensor shapes/types vary across invocations, preventing
         # the capture of a single computational graph.
         if is_forward_context_available() and get_forward_context().skip_compiled:
             return self.forward(*args, **kwargs)
+
+        compile_variant_key = _xcpu_gdn_compile_variant_key()
+        if compile_variant_key is not None or hasattr(self, "_compile_variant_states"):
+            wrapper = cast(TorchCompileWithNoGuardsWrapper, self)
+            wrapper.activate_compile_variant(
+                compile_variant_key
+                or TorchCompileWithNoGuardsWrapper.DEFAULT_COMPILE_VARIANT_KEY,
+            )
 
         # if aot_compiled_fn is set, call it with partition wrapper context.
         # The partition wrapper must be active at runtime for CUDA graph
@@ -513,6 +523,8 @@ def _support_torch_compile(
             factors: list[str] = aot_compile_hash_factors(self.vllm_config)
 
             factors.append(_model_hash_key(self.forward))
+            if compile_variant_key is not None:
+                factors.append(f"compile_variant:{compile_variant_key}")
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT,
@@ -535,6 +547,9 @@ def _support_torch_compile(
                         maybe_use_cudagraph_partition_wrapper(self.vllm_config),
                     ):
                         output = self.aot_compiled_fn(self, *args, **kwargs)
+                    cast(
+                        TorchCompileWithNoGuardsWrapper, self
+                    ).save_active_compile_variant_state()
                     return output
 
         if self.compiled:
@@ -643,6 +658,7 @@ def _support_torch_compile(
                     )
 
         self.compiled = True
+        cast(TorchCompileWithNoGuardsWrapper, self).save_active_compile_variant_state()
         return output
 
     # triggers VllmSerializableFunction.serialize()

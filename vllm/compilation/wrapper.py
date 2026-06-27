@@ -6,13 +6,19 @@ import sys
 from abc import abstractmethod
 from collections.abc import Callable, Generator
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from types import CodeType
-from typing import Any, ParamSpec, TypeVar
+from typing import Any, ParamSpec, TypeVar, cast
 
 import torch
 
 import vllm.envs as envs
-from vllm.config import CompilationMode, CUDAGraphMode, get_current_vllm_config
+from vllm.config import (
+    CompilationMode,
+    CUDAGraphMode,
+    get_current_vllm_config,
+    set_current_vllm_config,
+)
 from vllm.config.compilation import DynamicShapesType
 from vllm.logger import init_logger
 from vllm.utils.nvtx_pytorch_hooks import layerwise_nvtx_marker_context
@@ -21,6 +27,19 @@ logger = init_logger(__name__)
 
 R = TypeVar("R")
 P = ParamSpec("P")
+
+
+@dataclass
+class CompileVariantState:
+    compiled: bool
+    first_compile: bool
+    compiled_callable: Any
+    has_compiled_bytecode: bool
+    compiled_bytecode: CodeType | None
+    was_aot_compile_fn_loaded_from_disk: bool
+    aot_compiled_fn: Any
+    aot_compilation_path: str | None
+    aot_cache_dir: str | None
 
 
 @contextmanager
@@ -52,6 +71,8 @@ class TorchCompileWithNoGuardsWrapper:
     compilation is triggered. Dynamo should never be traced again after that
     since we drop all guards.
     """
+
+    DEFAULT_COMPILE_VARIANT_KEY = "__default__"
 
     def check_invariants_and_forward(self, *args: Any, **kwargs: Any) -> Any:
         assert hasattr(self, "_check_shape_invariants")
@@ -163,8 +184,97 @@ class TorchCompileWithNoGuardsWrapper:
             )
 
         if envs.VLLM_USE_BYTECODE_HOOK and mode != CompilationMode.STOCK_TORCH_COMPILE:
-            torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
+            if not getattr(self, "_bytecode_hook_registered", False):
+                torch._dynamo.convert_frame.register_bytecode_hook(self.bytecode_hook)
+                self._bytecode_hook_registered = True
             self._compiled_bytecode: CodeType | None = None
+
+    def capture_compile_variant_state(self) -> CompileVariantState:
+        return CompileVariantState(
+            compiled=self.compiled,
+            first_compile=self.first_compile,
+            compiled_callable=self._compiled_callable,
+            has_compiled_bytecode=hasattr(self, "_compiled_bytecode"),
+            compiled_bytecode=getattr(self, "_compiled_bytecode", None),
+            was_aot_compile_fn_loaded_from_disk=getattr(
+                self, "was_aot_compile_fn_loaded_from_disk", False
+            ),
+            aot_compiled_fn=getattr(self, "aot_compiled_fn", None),
+            aot_compilation_path=getattr(self, "_aot_compilation_path", None),
+            aot_cache_dir=getattr(self, "_aot_cache_dir", None),
+        )
+
+    def restore_compile_variant_state(self, state: CompileVariantState) -> None:
+        self.compiled = state.compiled
+        self.first_compile = state.first_compile
+        self._compiled_callable = state.compiled_callable
+        self.was_aot_compile_fn_loaded_from_disk = (
+            state.was_aot_compile_fn_loaded_from_disk
+        )
+        self.aot_compiled_fn = state.aot_compiled_fn
+        self._aot_compilation_path = state.aot_compilation_path
+        self._aot_cache_dir = state.aot_cache_dir
+        if state.has_compiled_bytecode:
+            self._compiled_bytecode = state.compiled_bytecode
+        elif hasattr(self, "_compiled_bytecode"):
+            self._compiled_bytecode = None
+
+    def new_compile_variant_state(self) -> None:
+        self.__class__.forward.__code__ = self.original_code_object()
+        torch._dynamo.eval_frame.remove_from_cache(self.original_code_object())
+        with set_current_vllm_config(self.vllm_config):
+            TorchCompileWithNoGuardsWrapper.__init__(
+                self,
+                compile_prefix=self._compile_prefix,
+                is_encoder=self._is_encoder,
+            )
+        self.compiled = False
+        self.was_aot_compile_fn_loaded_from_disk = False
+        self.aot_compiled_fn = None
+        self._aot_compilation_path = None
+        self._aot_cache_dir = None
+
+    def activate_compile_variant(self, key: str) -> None:
+        states = getattr(self, "_compile_variant_states", None)
+        if states is None:
+            states = {}
+            self._compile_variant_states = states
+        else:
+            states = cast(dict[str, CompileVariantState], states)
+
+        active_key = getattr(self, "_active_compile_variant_key", None)
+        if active_key == key:
+            return
+
+        if active_key is not None:
+            states[active_key] = self.capture_compile_variant_state()
+        elif self.compiled or states:
+            states[self.DEFAULT_COMPILE_VARIANT_KEY] = (
+                self.capture_compile_variant_state()
+            )
+
+        if key in states:
+            self.restore_compile_variant_state(states[key])
+        elif active_key is not None or states:
+            self.new_compile_variant_state()
+
+        self._active_compile_variant_key = key
+
+    def save_active_compile_variant_state(self) -> None:
+        active_key = getattr(self, "_active_compile_variant_key", None)
+        if active_key is None:
+            return
+        states = cast(
+            dict[str, CompileVariantState],
+            self._compile_variant_states,
+        )
+        states[active_key] = self.capture_compile_variant_state()
+
+    def clear_compile_variant_states(self) -> None:
+        if hasattr(self, "_compile_variant_states"):
+            delattr(self, "_compile_variant_states")
+        if hasattr(self, "_active_compile_variant_key"):
+            delattr(self, "_active_compile_variant_key")
 
     def aot_compile(self, *args: Any, **kwargs: Any) -> Any:
         if not hasattr(self._compiled_callable, "aot_compile"):
@@ -340,6 +450,7 @@ def reset_compile_wrapper(model: torch.nn.Module) -> None:
     compilation_config.local_cache_dir = ""
 
     model.__class__.forward.__code__ = model.original_code_object()
+    model.clear_compile_variant_states()
     TorchCompileWithNoGuardsWrapper.__init__(
         model,
         compile_prefix=model._compile_prefix,
