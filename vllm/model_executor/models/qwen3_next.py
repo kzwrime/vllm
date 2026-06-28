@@ -321,9 +321,13 @@ class Qwen3NextAttention(nn.Module):
         attn_output = self.attn(q, k, v)
 
         if self.attn_output_gate:
+            import torch_xcpu
+
             attn_output = attn_output.view(*orig_shape, self.num_heads, self.head_dim)
-            attn_output = attn_output * torch.sigmoid(gate)
-            attn_output = attn_output.view(*orig_shape, self.num_heads * self.head_dim)
+            # attn_output = attn_output * torch.sigmoid(gate)
+            fused_output = torch.empty_like(attn_output)
+            torch_xcpu.ops.fused_sigmoid_mul(fused_output, attn_output, gate)
+            attn_output = fused_output.view(*orig_shape, self.num_heads * self.head_dim)
 
         output[:], _ = self.o_proj(attn_output)
 
