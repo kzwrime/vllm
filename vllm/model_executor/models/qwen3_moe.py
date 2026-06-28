@@ -29,7 +29,6 @@ from itertools import islice
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
@@ -94,7 +93,6 @@ class Qwen3MoeMLP(nn.Module):
         hidden_act: str,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
-        expert_gate: torch.nn.Linear | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -118,15 +116,11 @@ class Qwen3MoeMLP(nn.Module):
                 f"Unsupported activation: {hidden_act}. Only silu is supported for now."
             )
         self.act_fn = SiluAndMul()
-        self.expert_gate = expert_gate
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
         out = self.act_fn(gate_up)
         out, _ = self.down_proj(out)
-
-        if self.expert_gate is not None:
-            out = F.sigmoid(self.expert_gate(x)[0]) * out
 
         return out
 
@@ -198,7 +192,6 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
-                expert_gate=self.shared_expert_gate,
                 prefix=f"{prefix}.shared_expert",
             )
         else:
@@ -237,9 +230,20 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         shared_out, fused_out = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-        final_hidden_states = (
-            shared_out + fused_out if shared_out is not None else fused_out
-        )
+        if shared_out is not None:
+            import torch_xcpu
+
+            assert self.shared_expert_gate is not None
+            shared_gate, _ = self.shared_expert_gate(hidden_states)
+            final_hidden_states = torch.empty_like(fused_out)
+            torch_xcpu.ops.fused_sigmoid_mul_add(
+                final_hidden_states,
+                shared_out,
+                shared_gate,
+                fused_out,
+            )
+        else:
+            final_hidden_states = fused_out
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(

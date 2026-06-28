@@ -139,7 +139,6 @@ class Qwen3NextSparseMoeBlock(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
-                expert_gate=self.shared_expert_gate,
                 prefix=f"{prefix}.shared_expert",
                 disable_tp=envs.VLLM_SHARED_EXPERT_DISABLE_TP,
             )
@@ -184,7 +183,17 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             )
 
         if self.shared_expert is not None:
-            final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
+            import torch_xcpu
+
+            shared_hidden_states, moe_hidden_states = final_hidden_states
+            shared_gate, _ = self.shared_expert_gate(hidden_states)
+            final_hidden_states = torch.empty_like(moe_hidden_states)
+            torch_xcpu.ops.fused_sigmoid_mul_add(
+                final_hidden_states,
+                shared_hidden_states,
+                shared_gate,
+                moe_hidden_states,
+            )
 
         if self.is_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(

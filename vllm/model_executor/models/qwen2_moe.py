@@ -30,7 +30,6 @@ from itertools import islice
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 from transformers import Qwen2MoeConfig
 
@@ -80,7 +79,6 @@ class Qwen2MoeMLP(nn.Module):
         hidden_act: str,
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
-        expert_gate: torch.nn.Linear | None = None,
         prefix: str = "",
         disable_tp: bool = False,
     ) -> None:
@@ -107,15 +105,11 @@ class Qwen2MoeMLP(nn.Module):
                 f"Unsupported activation: {hidden_act}. Only silu is supported for now."
             )
         self.act_fn = SiluAndMul()
-        self.expert_gate = expert_gate
 
     def forward(self, x):
         gate_up, _ = self.gate_up_proj(x)
         out = self.act_fn(gate_up)
         out, _ = self.down_proj(out)
-
-        if self.expert_gate is not None:
-            out = F.sigmoid(self.expert_gate(x)[0]) * out
 
         return out
 
@@ -159,7 +153,6 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
-                expert_gate=self.shared_expert_gate,
                 prefix=f"{prefix}.shared_expert",
                 disable_tp=envs.VLLM_SHARED_EXPERT_DISABLE_TP,
             )
@@ -190,7 +183,17 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
             hidden_states=hidden_states, router_logits=router_logits
         )
         if self.shared_expert is not None:
-            final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
+            import torch_xcpu
+
+            shared_hidden_states, moe_hidden_states = final_hidden_states
+            shared_gate, _ = self.shared_expert_gate(hidden_states)
+            final_hidden_states = torch.empty_like(moe_hidden_states)
+            torch_xcpu.ops.fused_sigmoid_mul_add(
+                final_hidden_states,
+                shared_hidden_states,
+                shared_gate,
+                moe_hidden_states,
+            )
         if self.tp_size > 1:
             final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(  # noqa E501
                 final_hidden_states
