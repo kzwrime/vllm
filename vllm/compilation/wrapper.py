@@ -143,6 +143,10 @@ class TorchCompileWithNoGuardsWrapper:
 
             compiled_ptr = self.check_invariants_and_forward
 
+        compiled_forward_wrapper = getattr(self, "_vllm_wrap_compiled_forward", None)
+        if compiled_forward_wrapper is not None:
+            compiled_ptr = compiled_forward_wrapper(compiled_ptr)
+
         aot_context = nullcontext()
         if envs.VLLM_USE_AOT_COMPILE:
             if hasattr(torch._dynamo.config, "enable_aot_compile"):

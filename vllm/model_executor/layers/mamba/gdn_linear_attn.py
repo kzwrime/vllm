@@ -490,6 +490,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
+        gdn_decode_non_spec_direct_call: bool | None = None,
     ):
         """
         Forward pass with three parts:
@@ -532,23 +533,34 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
-        enable_gdn_decode_non_spec_direct_call = (
-            self._gdn_decode_non_spec_direct_call_predicate()
-        )
-        if enable_gdn_decode_non_spec_direct_call is not None:
-            core_attn_out = torch.cond(
-                enable_gdn_decode_non_spec_direct_call,
-                self._forward_core_decode_non_spec_compile_out,
-                self._forward_core_python_callback_out,
-                [mixed_qkv, ba],
+        if gdn_decode_non_spec_direct_call is True:
+            core_attn_out = self._forward_core_decode_non_spec_compile_out(
+                mixed_qkv,
+                ba,
+            )
+        elif gdn_decode_non_spec_direct_call is False:
+            core_attn_out = self._forward_core_python_callback_out(
+                mixed_qkv,
+                ba,
             )
         else:
-            core_attn_out = torch.ops.vllm.gdn_attention_core(
-                mixed_qkv,
-                b,
-                a,
-                self.prefix,
+            enable_gdn_decode_non_spec_direct_call = (
+                self._gdn_decode_non_spec_direct_call_predicate()
             )
+            if enable_gdn_decode_non_spec_direct_call is None:
+                core_attn_out = torch.ops.vllm.gdn_attention_core(
+                    mixed_qkv,
+                    b,
+                    a,
+                    self.prefix,
+                )
+            else:
+                core_attn_out = torch.cond(
+                    enable_gdn_decode_non_spec_direct_call,
+                    self._forward_core_decode_non_spec_compile_out,
+                    self._forward_core_python_callback_out,
+                    [mixed_qkv, ba],
+                )
 
         # ============================================================
         # Part 3: Output Projection

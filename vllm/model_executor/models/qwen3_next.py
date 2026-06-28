@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3Next model."""
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from itertools import islice
 
 import torch
@@ -22,6 +22,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
@@ -55,6 +56,7 @@ from vllm.model_executor.models.qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 from .interfaces import (
     HasInnerState,
@@ -403,6 +405,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         positions: torch.Tensor = None,
+        gdn_decode_non_spec_direct_call: bool | None = None,
         **kwargs: object,
     ):
         if residual is None:
@@ -416,6 +419,7 @@ class Qwen3NextDecoderLayer(nn.Module):
             self.linear_attn(
                 hidden_states=hidden_states,
                 output=self_attention_output,
+                gdn_decode_non_spec_direct_call=gdn_decode_non_spec_direct_call,
             )
         elif self.layer_type == "full_attention":
             self.self_attn(
@@ -502,12 +506,125 @@ class Qwen3NextModel(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
+    def _gdn_decode_non_spec_direct_call_predicate(self) -> torch.Tensor | None:
+        if (
+            not envs.VLLM_XCPU_GDN_DECODE_ONLY_COMPILE
+            or not envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
+            or not is_forward_context_available()
+        ):
+            return None
+        attn_metadata = get_forward_context().attn_metadata
+        if not isinstance(attn_metadata, dict):
+            return None
+
+        predicate = None
+        has_gdn_metadata = False
+        for metadata in attn_metadata.values():
+            if not isinstance(metadata, GDNAttentionMetadata):
+                continue
+            has_gdn_metadata = True
+            if metadata.enable_gdn_decode_non_spec_direct_call is None:
+                return None
+            predicate = metadata.enable_gdn_decode_non_spec_direct_call
+
+        if not has_gdn_metadata:
+            return None
+        return predicate
+
+    def _vllm_wrap_compiled_forward(
+        self,
+        forward_fn: Callable[..., object],
+    ) -> Callable[..., object]:
+        def forward_with_gdn_outer_cond(
+            input_ids: torch.Tensor | None,
+            positions: torch.Tensor,
+            intermediate_tensors: IntermediateTensors | None = None,
+            inputs_embeds: torch.Tensor | None = None,
+        ) -> object:
+            predicate = self._gdn_decode_non_spec_direct_call_predicate()
+            if predicate is None or intermediate_tensors is not None:
+                return forward_fn(
+                    input_ids,
+                    positions,
+                    intermediate_tensors,
+                    inputs_embeds,
+                )
+
+            if inputs_embeds is not None:
+
+                def decode_non_spec_branch(
+                    branch_positions: torch.Tensor,
+                    branch_inputs_embeds: torch.Tensor,
+                ) -> object:
+                    return forward_fn(
+                        None,
+                        branch_positions,
+                        None,
+                        branch_inputs_embeds,
+                        True,
+                    )
+
+                def python_callback_branch(
+                    branch_positions: torch.Tensor,
+                    branch_inputs_embeds: torch.Tensor,
+                ) -> object:
+                    return forward_fn(
+                        None,
+                        branch_positions,
+                        None,
+                        branch_inputs_embeds,
+                        False,
+                    )
+
+                return torch.cond(
+                    predicate,
+                    decode_non_spec_branch,
+                    python_callback_branch,
+                    [positions, inputs_embeds],
+                )
+
+            assert input_ids is not None
+
+            def decode_non_spec_branch(
+                branch_input_ids: torch.Tensor,
+                branch_positions: torch.Tensor,
+            ) -> object:
+                return forward_fn(
+                    branch_input_ids,
+                    branch_positions,
+                    None,
+                    None,
+                    True,
+                )
+
+            def python_callback_branch(
+                branch_input_ids: torch.Tensor,
+                branch_positions: torch.Tensor,
+            ) -> object:
+                return forward_fn(
+                    branch_input_ids,
+                    branch_positions,
+                    None,
+                    None,
+                    False,
+                )
+
+            return torch.cond(
+                predicate,
+                decode_non_spec_branch,
+                python_callback_branch,
+                [input_ids, positions],
+            )
+
+        return forward_with_gdn_outer_cond
+
     def forward(
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
+        gdn_decode_non_spec_direct_call: bool | None = None,
     ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -533,6 +650,7 @@ class Qwen3NextModel(nn.Module):
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
+                gdn_decode_non_spec_direct_call=gdn_decode_non_spec_direct_call,
             )
 
         if not get_pp_group().is_last_rank:

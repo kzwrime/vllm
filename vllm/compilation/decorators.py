@@ -574,6 +574,8 @@ def _support_torch_compile(
             inductor_config_patches["assume_32bit_indexing"] = (
                 self.compilation_config.dynamic_shapes_config.assume_32_bit_indexing
             )
+        if envs.VLLM_XCPU_GDN_DECODE_ONLY_COMPILE:
+            inductor_config_patches["allow_buffer_reuse"] = False
 
         with (
             patch.object(
