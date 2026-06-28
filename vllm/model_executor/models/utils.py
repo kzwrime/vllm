@@ -13,6 +13,7 @@ import torch.nn as nn
 from torch.nn.modules.module import register_module_module_registration_hook
 from transformers import PretrainedConfig
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -38,6 +39,41 @@ from vllm.utils.torch_utils import (
 )
 
 logger = init_logger(__name__)
+
+
+def apply_xcpu_shared_expert_gate(
+    output: torch.Tensor,
+    hidden_states: torch.Tensor,
+    shared_expert_gate: nn.Module,
+    shared_expert_output: torch.Tensor,
+    moe_output: torch.Tensor,
+) -> None:
+    import torch_xcpu
+
+    gate_weight = getattr(shared_expert_gate, "weight", None)
+    if (
+        envs.VLLM_XCPU_USE_FUSED_DOT_SIGMOID_MUL_ADD
+        and hasattr(torch_xcpu.ops, "fused_dot_sigmoid_mul_add")
+        and isinstance(gate_weight, torch.Tensor)
+        and not gate_weight.is_meta
+        and gate_weight.numel() > 0
+    ):
+        torch_xcpu.ops.fused_dot_sigmoid_mul_add(
+            output,
+            hidden_states,
+            gate_weight,
+            shared_expert_output,
+            moe_output,
+        )
+        return
+
+    shared_gate, _ = shared_expert_gate(hidden_states)
+    torch_xcpu.ops.fused_sigmoid_mul_add(
+        output,
+        shared_expert_output,
+        shared_gate,
+        moe_output,
+    )
 
 
 @dataclass

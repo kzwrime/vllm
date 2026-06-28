@@ -249,6 +249,7 @@ if TYPE_CHECKING:
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_USE_XCPU_LINEAR: bool = False
+    VLLM_XCPU_USE_FUSED_DOT_SIGMOID_MUL_ADD: bool = False
     VLLM_XCPU_FUSE_GDN_IN_PROJ_QKVZBA: bool = False
     VLLM_DISABLE_TQDM_AND_MONITOR: bool = False
     VLLM_EPLB_COMM_BACKEND: str = "torch"
@@ -1678,6 +1679,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
     "VLLM_USE_XCPU_LINEAR": lambda: bool(int(os.getenv("VLLM_USE_XCPU_LINEAR", "0"))),
+    # Use torch_xcpu fused dot+sigmoid+mul+add for shared expert gating.
+    "VLLM_XCPU_USE_FUSED_DOT_SIGMOID_MUL_ADD": lambda: bool(
+        int(os.getenv("VLLM_XCPU_USE_FUSED_DOT_SIGMOID_MUL_ADD", "0"))
+    ),
     "VLLM_XCPU_FUSE_GDN_IN_PROJ_QKVZBA": lambda: bool(
         int(os.getenv("VLLM_XCPU_FUSE_GDN_IN_PROJ_QKVZBA", "0"))
     ),

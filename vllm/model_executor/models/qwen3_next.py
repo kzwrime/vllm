@@ -66,6 +66,7 @@ from .interfaces import (
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    apply_xcpu_shared_expert_gate,
     extract_layer_index,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -183,15 +184,13 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             )
 
         if self.shared_expert is not None:
-            import torch_xcpu
-
             shared_hidden_states, moe_hidden_states = final_hidden_states
-            shared_gate, _ = self.shared_expert_gate(hidden_states)
             final_hidden_states = torch.empty_like(moe_hidden_states)
-            torch_xcpu.ops.fused_sigmoid_mul_add(
+            apply_xcpu_shared_expert_gate(
                 final_hidden_states,
+                hidden_states,
+                self.shared_expert_gate,
                 shared_hidden_states,
-                shared_gate,
                 moe_hidden_states,
             )
 
