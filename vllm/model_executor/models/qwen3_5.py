@@ -283,26 +283,41 @@ class Qwen3_5Model(Qwen3NextModel):
             # mlp
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
-            ("in_proj_ba", "in_proj_b", 0),
-            ("in_proj_ba", "in_proj_a", 1),
         ]
+
+        params_dict = dict(self.named_parameters())
+        has_in_proj_qkvzba = any(
+            name.endswith(".in_proj_qkvzba.weight") for name in params_dict
+        )
 
         if self.enable_lora:
             stacked_params_mapping.extend(
                 [
+                    ("in_proj_ba", "in_proj_b", 0),
+                    ("in_proj_ba", "in_proj_a", 1),
                     ("in_proj_qkv", "in_proj_qkv", (0, 1, 2)),
                     ("in_proj_z", "in_proj_z", 0),
+                ]
+            )
+        elif has_in_proj_qkvzba:
+            stacked_params_mapping.extend(
+                [
+                    ("in_proj_qkvzba", "in_proj_qkv", (0, 1, 2)),
+                    ("in_proj_qkvzba", "in_proj_z", 3),
+                    ("in_proj_qkvzba", "in_proj_b", 4),
+                    ("in_proj_qkvzba", "in_proj_a", 5),
                 ]
             )
         else:
             stacked_params_mapping.extend(
                 [
+                    ("in_proj_ba", "in_proj_b", 0),
+                    ("in_proj_ba", "in_proj_a", 1),
                     ("in_proj_qkvz", "in_proj_qkv", (0, 1, 2)),
                     ("in_proj_qkvz", "in_proj_z", 3),
                 ]
             )
 
-        params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
         is_fused_expert = False
@@ -459,6 +474,7 @@ class Qwen3_5ForCausalLMBase(
         # GDN fused projections.
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
+        "in_proj_qkvzba": ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -488,6 +504,7 @@ class Qwen3_5ForCausalLMBase(
             base = getattr(Qwen3_5ForCausalLMBase, "packed_modules_mapping", {})
             self.packed_modules_mapping = {k: list(v) for k, v in base.items()}
             self.packed_modules_mapping.pop("in_proj_qkvz", None)
+            self.packed_modules_mapping.pop("in_proj_qkvzba", None)
             self.packed_modules_mapping["in_proj_qkv"] = ["in_proj_qkv"]
             self.packed_modules_mapping["in_proj_z"] = ["in_proj_z"]
 
@@ -578,6 +595,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
+        "in_proj_qkvzba": ["in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
@@ -619,6 +637,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             )
             self.packed_modules_mapping = {k: list(v) for k, v in base.items()}
             self.packed_modules_mapping.pop("in_proj_qkvz", None)
+            self.packed_modules_mapping.pop("in_proj_qkvzba", None)
             self.packed_modules_mapping["in_proj_qkv"] = ["in_proj_qkv"]
 
     def embed_input_ids(
