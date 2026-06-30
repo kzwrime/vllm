@@ -6118,6 +6118,7 @@ class GPUModelRunner(
                     ubatch_slices=ubatch_slices_padded,
                     slot_mapping=slot_mappings,
                     is_padding=is_padding,
+                    skip_compiled=attn_metadata is None,
                 ),
             ):
                 outputs = self.model(
