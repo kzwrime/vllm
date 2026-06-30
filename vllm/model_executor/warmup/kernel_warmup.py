@@ -73,9 +73,9 @@ def _warmup_ll_bf16_router_gemm() -> None:
 
 
 def kernel_warmup(worker: "Worker"):
-    from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
-        minimax_m3_msa_warmup,
-    )
+    # from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
+    #     minimax_m3_msa_warmup,
+    # )
 
     # Pooling models do not use the generation slot-mapping path.
     if not worker.use_v2_model_runner and not worker.model_runner.is_pooling_model:
@@ -111,7 +111,8 @@ def kernel_warmup(worker: "Worker"):
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
 
-    minimax_m3_msa_warmup(worker)
+    # if minimax_m3_msa_warmup is not None:
+    #     minimax_m3_msa_warmup(worker)
 
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune
