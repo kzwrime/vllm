@@ -673,11 +673,11 @@ def _apply_cpp_indirect_assert_patch():
 
     def patched_indirect_assert(self, var, lower, upper, mask=None):
         assert isinstance(var, CppCSEVariable)
-        assert var.dtype is not None
         if not var.is_vec:
             if isinstance(mask, CppCSEVariable) and mask.is_vec:
                 mask = f"({mask}).all_masked()"
             return super(CppVecKernel, self).indirect_assert(var, lower, upper, mask)
+        assert var.dtype is not None
         lower_scalar = lower
         upper_scalar = upper
         if lower:
