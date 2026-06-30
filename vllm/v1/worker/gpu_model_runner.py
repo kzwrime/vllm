@@ -5971,6 +5971,7 @@ class GPUModelRunner(
                     batch_descriptor=batch_desc,
                     ubatch_slices=ubatch_slices_padded,
                     slot_mapping=slot_mappings,
+                    skip_compiled=attn_metadata is None,
                 ),
             ):
                 outputs = self.model(
