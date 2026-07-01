@@ -101,6 +101,7 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
+    VLLM_ENABLE_FLA_CUSTOM_PREFILL: bool = True
     VLLM_XCPU_GDN_DECODE_ONLY_COMPILE: bool = False
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
@@ -952,6 +953,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     else os.environ["VLLM_DISABLED_KERNELS"].split(","),
     "VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE", "1"))
+    ),
+    "VLLM_ENABLE_FLA_CUSTOM_PREFILL": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_FLA_CUSTOM_PREFILL", "1"))
     ),
     # XCPU experiment: keep GDN prefill/mixed requests eager so no-guard
     # compilation is first traced on the decode-only GDN fast path.
