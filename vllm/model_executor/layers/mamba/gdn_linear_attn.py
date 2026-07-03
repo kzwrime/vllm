@@ -377,6 +377,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
+        self.enable_custom_prefill = envs.VLLM_ENABLE_FLA_CUSTOM_PREFILL
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -884,6 +885,8 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 attn_metadata=attn_metadata,
             )
 
+        assert attn_metadata.num_prefills > 0
+        assert attn_metadata.spec_sequence_masks is None
         has_initial_state = attn_metadata.has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc
         non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
@@ -969,10 +972,12 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         else:
             mixed_qkv_non_spec = None
 
-        query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
-        query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
-            mixed_qkv_non_spec
-        )
+        if spec_sequence_masks is not None:
+            query_spec, key_spec, value_spec = self.rearrange_mixed_qkv(mixed_qkv_spec)
+        if not self.enable_custom_prefill and attn_metadata.num_prefills > 0:
+            query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(
+                mixed_qkv_non_spec
+            )
 
         if attn_metadata.num_prefills > 0:
             g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
@@ -1017,26 +1022,38 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
 
         # 2.2: Process the remaining part
         if attn_metadata.num_prefills > 0:
-            initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
-            initial_state[~has_initial_state, ...] = 0
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = self.chunk_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=non_spec_query_start_loc,
-                use_qk_l2norm_in_kernel=True,
-            )
-            # Init cache
-            ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
-                ssm_state.dtype
-            )
+            if not self.enable_custom_prefill:
+                initial_state = ssm_state[non_spec_state_indices_tensor].contiguous()
+                initial_state[~has_initial_state, ...] = 0
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                ) = self.chunk_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    cu_seqlens=non_spec_query_start_loc,
+                    use_qk_l2norm_in_kernel=True,
+                )
+                # Init cache
+                ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
+                    ssm_state.dtype
+                )
+            else:
+                (core_attn_out_non_spec,) = self.chunk_gated_delta_rule(
+                    mixed_qkv=mixed_qkv_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    ssm_state=ssm_state,
+                    ssm_state_indices=non_spec_state_indices_tensor,
+                    has_initial_state=has_initial_state,
+                    cu_seqlens=non_spec_query_start_loc,
+                    use_qk_l2norm_in_kernel=True,
+                )
         elif attn_metadata.num_decodes > 0:
             if a_recurrent is None or b_recurrent is None:
                 a_recurrent = a.contiguous()
