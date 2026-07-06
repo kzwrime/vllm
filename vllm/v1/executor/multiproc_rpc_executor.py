@@ -18,6 +18,7 @@ import os
 import socket
 from typing import Any
 
+import vllm.envs as envs
 from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_ip, get_open_port
@@ -32,7 +33,7 @@ from vllm.v1.executor.socket_utils import sock_recv, sock_send
 logger = init_logger(__name__)
 
 # Default base port; each worker rank uses base_port + rank
-_DEFAULT_MP_RPC_READY_BASE_PORT = 17300
+_DEFAULT_MP_RPC_READY_BASE_PORT = envs.VLLM_MP_RPC_READY_BASE_PORT
 
 
 def _get_rpc_base_port() -> int:
@@ -87,6 +88,11 @@ class MultiprocRPCExecutor(MultiprocExecutor):
                    rank-0's actual peer IP (it hosts the PyTorch TCPStore
                    rendezvous), not the executor's IP.
         """
+        if scheduler_output_handle is None:
+            raise RuntimeError(
+                "mp_rpc executor must run on the DP leader (node_rank_within_dp == 0)"
+            )
+
         base_port = _get_rpc_base_port()
         executor_ip = get_ip()
         n = self.local_world_size
@@ -127,7 +133,7 @@ class MultiprocRPCExecutor(MultiprocExecutor):
                     rank0_ip, dist_port
                 )
                 logger.info(
-                    "Cross-node mode: patched distributed_init_method → %s",
+                    "Cross-node mode: patched distributed_init_method -> %s",
                     distributed_init_method,
                 )
 
@@ -190,9 +196,11 @@ class MultiprocRPCExecutor(MultiprocExecutor):
         if rpc_mq := getattr(self, "rpc_broadcast_mq", None):
             rpc_mq.shutdown()
             self.rpc_broadcast_mq = None
-        # Release references but do NOT call .shutdown() on response MQs —
-        # workers own those and will clean them up themselves.
+        for mq in getattr(self, "response_mqs", []):
+            mq.shutdown()
         self.response_mqs = []
+        for worker in getattr(self, "workers", []):
+            worker.worker_response_mq = None
 
     # ------------------------------------------------------------------
     # No-op: can't monitor external processes via sentinel
@@ -231,11 +239,18 @@ def _wait_for_ready_rpc(
             )
 
         logger.info("Worker rank %d is READY", rank)
-        worker_response_mq = MessageQueue.create_from_handle(response["handle"], 0)
+        worker_response_mq = MessageQueue.create_from_handle(response["handle"], -1)
+        peer_response_handles = response.get("peer_response_handles", [])
+        peer_worker_response_mqs = [
+            MessageQueue.create_from_handle(handle, -1)
+            if handle.remote_subscribe_addr is not None
+            else None
+            for handle in peer_response_handles
+        ]
         ready_handles[rank % len(ready_handles)] = WorkerProcHandle.from_unready_handle(
             uw,
             worker_response_mq=worker_response_mq,
-            peer_worker_response_mqs=[],  # single-node only for now
+            peer_worker_response_mqs=peer_worker_response_mqs,
         )
 
     return ready_handles  # type: ignore[return-value]

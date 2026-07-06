@@ -13,7 +13,7 @@ Usage:
         --local-rank <local_rank>
 
 Environment variables:
-    VLLM_MP_RPC_READY_BASE_PORT: Base port for ready connections (default: 17300)
+    VLLM_MP_RPC_READY_BASE_PORT: Base port for ready connections (default: 28888)
         The actual port used will be VLLM_MP_RPC_READY_BASE_PORT + rank
     VLLM_USE_MP_RPC: Must be set to "1" for RPC mode
 """
@@ -66,13 +66,13 @@ def rpc_worker_main(
     """
     from multiprocessing import get_context as mp_get_context
 
+    import vllm.envs as envs
     from vllm.envs import enable_envs_cache
     from vllm.logger import init_logger
-    from vllm.v1.executor.multiproc_executor import (
-        WorkerProc,
-        set_multiprocessing_worker_envs,
-    )
+    from vllm.tracing import maybe_init_worker_tracer
+    from vllm.v1.executor.multiproc_executor import WorkerProc
     from vllm.v1.executor.socket_utils import sock_recv, sock_send
+    from vllm.v1.executor.vllm_net_devices import set_worker_net_device
 
     logger = init_logger(__name__)
 
@@ -87,7 +87,9 @@ def rpc_worker_main(
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 
-    base_port = int(os.environ.get("VLLM_MP_RPC_READY_BASE_PORT", "28888"))
+    base_port = int(
+        os.environ.get("VLLM_MP_RPC_READY_BASE_PORT", envs.VLLM_MP_RPC_READY_BASE_PORT)
+    )
     ready_port = base_port + rank
 
     # Retry connecting for up to 5 minutes
@@ -144,7 +146,20 @@ def rpc_worker_main(
             cfg_rank = config_dict["rank"]
             is_driver_worker = config_dict["is_driver_worker"]
 
-            set_multiprocessing_worker_envs()
+            assigned_physical_gpu_ids = (
+                vllm_config.parallel_config.assigned_physical_gpu_ids
+            )
+            if assigned_physical_gpu_ids is not None:
+                from vllm.platforms.interface import set_assigned_physical_gpu_ids
+
+                set_assigned_physical_gpu_ids(assigned_physical_gpu_ids)
+
+            set_worker_net_device(cfg_local_rank, vllm_config)
+            maybe_init_worker_tracer(
+                instrumenting_module_name="vllm.worker",
+                process_kind="worker",
+                process_name=f"Worker_{cfg_rank}",
+            )
 
             # Each worker creates its own lock
             worker_lock = mp_get_context("spawn").Lock()
@@ -164,6 +179,7 @@ def rpc_worker_main(
             ready_payload = {
                 "status": WorkerProc.READY_STR,
                 "handle": worker.worker_response_mq.export_handle(),
+                "peer_response_handles": worker.peer_response_handles,
             }
             sock_send(sock, ready_payload)
 
@@ -210,7 +226,7 @@ def main():
         )
         MPI.COMM_WORLD.Barrier()
 
-    # Set RPC mode
+    # Set RPC mode for code paths that inspect the worker environment.
     os.environ["VLLM_USE_MP_RPC"] = "1"
 
     # Call the worker main

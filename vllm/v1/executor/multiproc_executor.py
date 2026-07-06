@@ -52,6 +52,7 @@ from vllm.utils.network_utils import (
     get_loopback_ip,
     get_open_port,
 )
+from vllm.utils.ompmultiprocessing import OMPProcessManager
 from vllm.utils.system_utils import (
     _maybe_force_spawn,
     decorate_logs,
@@ -171,20 +172,7 @@ class MultiprocExecutor(Executor):
             if self.monitor_workers:
                 self.start_worker_monitor()
 
-            self.response_mqs = []
-            # Only leader node have remote response mqs
-            if self.parallel_config.node_rank_within_dp == 0:
-                for rank in range(self.world_size):
-                    if rank < self.local_world_size:
-                        local_message_queue = self.workers[rank].worker_response_mq
-                        assert local_message_queue is not None
-                        self.response_mqs.append(local_message_queue)
-                    else:
-                        remote_message_queue = self.workers[0].peer_worker_response_mqs[
-                            rank
-                        ]
-                        assert remote_message_queue is not None
-                        self.response_mqs.append(remote_message_queue)
+            self.response_mqs = self._setup_response_mqs()
 
             # Ensure message queues are ready. Will deadlock if re-ordered
             # Must be kept consistent with the WorkerProc.
@@ -225,19 +213,23 @@ class MultiprocExecutor(Executor):
             inherited_fds: list[int] | None = (
                 [] if context.get_start_method() == "fork" else None
             )
+            cpu_omp_manager = OMPProcessManager(self.vllm_config)
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
                 is_driver_worker = self._is_driver_worker(global_rank)
-                unready_worker_handle = WorkerProc.make_worker_process(
-                    vllm_config=self.vllm_config,
-                    local_rank=local_rank,
-                    rank=global_rank,
-                    distributed_init_method=distributed_init_method,
-                    input_shm_handle=scheduler_output_handle,
-                    shared_worker_lock=shared_worker_lock,
-                    is_driver_worker=is_driver_worker,
-                    inherited_fds=inherited_fds,
-                )
+                with cpu_omp_manager.configure_omp_envs(
+                    rank=global_rank, local_rank=local_rank
+                ):
+                    unready_worker_handle = WorkerProc.make_worker_process(
+                        vllm_config=self.vllm_config,
+                        local_rank=local_rank,
+                        rank=global_rank,
+                        distributed_init_method=distributed_init_method,
+                        input_shm_handle=scheduler_output_handle,
+                        shared_worker_lock=shared_worker_lock,
+                        is_driver_worker=is_driver_worker,
+                        inherited_fds=inherited_fds,
+                    )
                 unready_workers.append(unready_worker_handle)
                 if inherited_fds is not None:
                     inherited_fds.append(unready_worker_handle.death_writer.fileno())
@@ -271,6 +263,23 @@ class MultiprocExecutor(Executor):
 
     def _post_init_executor(self) -> None:
         pass
+
+    def _setup_response_mqs(self) -> list[MessageQueue]:
+        response_mqs: list[MessageQueue] = []
+        # Only leader node has remote response mqs.
+        if self.parallel_config.node_rank_within_dp == 0:
+            for rank in range(self.world_size):
+                if rank < self.local_world_size:
+                    local_message_queue = self.workers[rank].worker_response_mq
+                    assert local_message_queue is not None
+                    response_mqs.append(local_message_queue)
+                else:
+                    remote_message_queue = self.workers[0].peer_worker_response_mqs[
+                        rank
+                    ]
+                    assert remote_message_queue is not None
+                    response_mqs.append(remote_message_queue)
+        return response_mqs
 
     def _is_driver_worker(self, rank: int) -> bool:
         return rank % self.parallel_config.tensor_parallel_size == 0
