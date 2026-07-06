@@ -215,7 +215,12 @@ class UnquantizedLinearMethod(LinearMethodBase):
         if envs.VLLM_USE_XCPU_LINEAR:
             from vllm.model_executor.layers.utils import dispatch_xcpu_unquantized_gemm
 
-            dispatch_xcpu_unquantized_gemm(layer, remove_weight=True)
+            keep_weight_for_fused_ffn = envs.VLLM_XCPU_USE_FUSED_FFN and getattr(
+                layer, "prefix", ""
+            ).endswith((".gate_up_proj", ".down_proj"))
+            dispatch_xcpu_unquantized_gemm(
+                layer, remove_weight=not keep_weight_for_fused_ffn
+            )
             return
 
         if current_platform.is_cpu():

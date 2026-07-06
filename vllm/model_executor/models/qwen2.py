@@ -77,6 +77,7 @@ from .utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    try_xcpu_fused_ffn,
 )
 
 
@@ -111,6 +112,10 @@ class Qwen2MLP(nn.Module):
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
+        fused_out = try_xcpu_fused_ffn(x, self.gate_up_proj, self.down_proj)
+        if fused_out is not None:
+            return fused_out
+
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
