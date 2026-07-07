@@ -44,6 +44,12 @@ def batch_memcpy(src_ptrs, dst_ptrs, sizes):
     assert dst_ptrs.shape[0] == batch
     assert sizes.shape[0] == batch
 
+    if src_ptrs.device.type in ("cpu", torch._C._get_privateuse1_backend_name()):
+        import torch_xcpu.ops as xcpu_ops
+
+        xcpu_ops.batch_memcpy(src_ptrs, dst_ptrs, sizes)
+        return
+
     grid = (batch,)
     BLOCK_SIZE = 1024
     batch_memcpy_kernel[grid](src_ptrs, dst_ptrs, sizes, BLOCK_SIZE=BLOCK_SIZE)
