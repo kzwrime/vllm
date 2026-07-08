@@ -793,6 +793,7 @@ class Worker(WorkerBase):
                 num_tokens=max_num_reqs,
                 skip_eplb=True,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                force_attention=True,
             )
             if self.model_runner.is_pooling_model:
                 self.model_runner._dummy_pooler_run(hidden_states)
