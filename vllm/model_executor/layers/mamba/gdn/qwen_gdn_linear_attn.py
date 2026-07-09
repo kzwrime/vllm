@@ -1157,8 +1157,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 initial_state=state,
                 output_final_state=True,
                 cu_seqlens=cu_seqlens,
-                chunk_indices=chunk_indices,
-                chunk_offsets=chunk_offsets,
+                # chunk_indices=chunk_indices,
+                # chunk_offsets=chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
             )
         except Exception:
@@ -1524,8 +1524,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 initial_state=initial_state,
                 output_final_state=True,
                 cu_seqlens=attn_metadata.prefill_query_start_loc,
-                chunk_indices=attn_metadata.chunk_indices,
-                chunk_offsets=attn_metadata.chunk_offsets,
+                # chunk_indices=attn_metadata.chunk_indices,
+                # chunk_offsets=attn_metadata.chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
             )
             # Init cache
