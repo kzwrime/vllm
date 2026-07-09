@@ -5,6 +5,7 @@ import torch
 
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import make_low_priority_cuda_stream
 from vllm.utils.triton_fallback_selector import resolve_fallback_kernel
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -19,7 +20,7 @@ class StructuredOutputsWorker:
             (max_num_logits, cdiv(vocab_size, 32)), dtype=torch.int32, device=device
         )
         self.device = device
-        self.copy_stream = torch.cuda.Stream()
+        self.copy_stream = make_low_priority_cuda_stream(device)
 
     def apply_grammar_bitmask(
         self,

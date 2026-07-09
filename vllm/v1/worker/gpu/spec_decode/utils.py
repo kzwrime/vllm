@@ -3,6 +3,7 @@
 import numpy as np
 import torch
 
+from vllm.utils.torch_utils import make_low_priority_cuda_stream
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -11,7 +12,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 class DraftTokensHandler:
     def __init__(self, device: torch.device | None = None):
         self.device = device
-        self.copy_stream = torch.cuda.Stream(device)
+        self.copy_stream = make_low_priority_cuda_stream(device)
         self.copy_event = torch.cuda.Event()
 
         self.req_ids: list[str] = []

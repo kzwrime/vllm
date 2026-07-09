@@ -22,6 +22,7 @@ import vllm.model_executor.offloader.prefetch_ops  # noqa: F401
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import BaseOffloader
 from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.torch_utils import make_low_priority_cuda_stream
 
 logger = init_logger(__name__)
 
@@ -153,7 +154,7 @@ class PrefetchOffloader(BaseOffloader):
         self.mode = mode
 
         # Copy stream for async H2D transfers
-        self.copy_stream = torch.cuda.Stream()
+        self.copy_stream = make_low_priority_cuda_stream()
 
         # Module offloaders and buffer pool (populated in wrap_modules/post_init)
         self.module_offloaders: list[_ModuleOffloader] = []

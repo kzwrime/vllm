@@ -590,6 +590,16 @@ def aux_stream() -> torch.cuda.Stream | None:
     return _aux_stream
 
 
+def make_low_priority_cuda_stream(
+    device: torch.device | int | str | None = None,
+) -> torch.cuda.Stream:
+    """Create a CUDA-compatible stream for background copy work."""
+    low_priority, _ = torch.cuda.Stream.priority_range()
+    if device is None:
+        return torch.cuda.Stream(priority=low_priority)
+    return torch.cuda.Stream(device=device, priority=low_priority)
+
+
 @lru_cache(maxsize=8)
 def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int:
     # Note: cuda_visible_devices is not used, but we keep it as an argument for

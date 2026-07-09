@@ -110,6 +110,7 @@ from vllm.utils.platform_utils import is_pin_memory_available, num_compute_units
 from vllm.utils.torch_utils import (
     get_dtype_size,
     kv_cache_dtype_str_to_dtype,
+    make_low_priority_cuda_stream,
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -644,7 +645,7 @@ class GPUModelRunner(
         # when async scheduling is enabled.
         self.prepare_inputs_event: torch.Event | None = None
         if self.use_async_scheduling:
-            self.async_output_copy_stream = torch.cuda.Stream()
+            self.async_output_copy_stream = make_low_priority_cuda_stream()
             self.prepare_inputs_event = torch.Event()
 
         # self.cudagraph_batch_sizes sorts in ascending order.
@@ -805,7 +806,7 @@ class GPUModelRunner(
                 self.max_num_reqs, dtype=torch.int32, pin_memory=self.pin_memory
             )
             self._num_valid_draft_tokens_event = torch.cuda.Event()
-            self._num_valid_draft_tokens_copy_stream = torch.cuda.Stream()
+            self._num_valid_draft_tokens_copy_stream = make_low_priority_cuda_stream()
 
         self._draft_token_req_ids: list[str] | None = None
         self.transfer_event = torch.Event()
@@ -830,7 +831,7 @@ class GPUModelRunner(
         if self.num_spec_tokens:
             self.draft_token_ids_event = torch.Event()
             self.num_accepted_tokens_event = torch.Event()
-            self.draft_token_ids_copy_stream = torch.cuda.Stream()
+            self.draft_token_ids_copy_stream = make_low_priority_cuda_stream()
             self.draft_token_ids_cpu = torch.empty(
                 (self.max_num_reqs, self.num_spec_tokens),
                 dtype=torch.int64,
@@ -839,7 +840,9 @@ class GPUModelRunner(
             )
             if self.use_async_scheduling:
                 self.valid_sampled_token_count_event = torch.Event()
-                self.valid_sampled_token_count_copy_stream = torch.cuda.Stream()
+                self.valid_sampled_token_count_copy_stream = (
+                    make_low_priority_cuda_stream()
+                )
                 self.valid_sampled_token_count_cpu = torch.empty(
                     self.max_num_reqs,
                     dtype=torch.int32,
