@@ -143,11 +143,24 @@ def do_mamba_copy_block(copy_bufs: MambaCopyBuffers):
     n = copy_bufs.offset
     if n == 0:
         return
-    batch_memcpy(
-        copy_bufs.src_ptrs.copy_to_gpu(n),
-        copy_bufs.dst_ptrs.copy_to_gpu(n),
-        copy_bufs.sizes.copy_to_gpu(n),
-    )
+    # On mcpu/cpu devices, pass CPU tensors directly to batch_memcpy.
+    # copy_to_gpu (cpu→mcpu non_blocking copy) has a stream-ordering bug
+    # where batch_memcpy reads stale zeros from the gpu tensor before the
+    # async copy completes. Using CPU tensors avoids this entirely since
+    # batch_memcpy on cpu/mcpu just does host memcpy with host pointers.
+    src_dev = copy_bufs.src_ptrs.gpu.device.type
+    if src_dev in ("cpu", torch._C._get_privateuse1_backend_name()):
+        batch_memcpy(
+            copy_bufs.src_ptrs.cpu[:n],
+            copy_bufs.dst_ptrs.cpu[:n],
+            copy_bufs.sizes.cpu[:n],
+        )
+    else:
+        batch_memcpy(
+            copy_bufs.src_ptrs.copy_to_gpu(n),
+            copy_bufs.dst_ptrs.copy_to_gpu(n),
+            copy_bufs.sizes.copy_to_gpu(n),
+        )
 
 
 def preprocess_mamba(
