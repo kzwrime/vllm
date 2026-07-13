@@ -152,8 +152,13 @@ class Sampler:
         expanded_local_pos: torch.Tensor,
         skip_top_k_top_p: bool = False,
     ) -> torch.Tensor:
+        import torch_xcpu
+
         # Copy logits to a new FP32 tensor.
-        logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
+        # logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
+        logits_new = torch.empty_like(logits, dtype=torch.float32)
+        torch_xcpu.ops.copy(output=logits_new, input=logits)
+        logits = logits_new
 
         # Apply logit bias (e.g., allowed_token_ids, min_tokens) in place.
         self.logit_bias_state.apply_logit_bias(
