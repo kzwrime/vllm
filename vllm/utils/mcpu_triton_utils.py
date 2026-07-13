@@ -169,9 +169,9 @@ def _temperature_kernel_impl(
     vocab_size: int,
     BLOCK_SIZE: int = 1024,
 ) -> None:
-    torch.ops.mcpu.vllm_temperature_kernel(
-        logits, expanded_idx_mapping, temperature, vocab_size
-    )
+    import torch_xcpu.ops as xcpu_ops
+
+    xcpu_ops.vllm_temperature_kernel(logits, expanded_idx_mapping, temperature)
 
 
 _temperature_kernel = _FuncWrapper(_temperature_kernel_impl)
