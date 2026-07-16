@@ -1072,6 +1072,10 @@ def unify_kv_cache_spec_page_size(
         return kv_cache_spec
 
     max_page_size = max(page_sizes)
+    # Note: Add new strategy for page_size unification.
+    for page_size in page_sizes:
+        if max_page_size % page_size != 0:
+            max_page_size = (max_page_size + page_size - 1) // page_size * page_size
     new_kv_cache_spec = {}
     for layer_name, layer_spec in kv_cache_spec.items():
         if layer_spec.page_size_bytes == max_page_size:
@@ -1082,7 +1086,7 @@ def unify_kv_cache_spec_page_size(
                 ratio = max_page_size // layer_page_size
                 new_block_size = layer_spec.block_size * ratio
                 new_spec = replace(layer_spec, block_size=new_block_size)
-            elif (
+            elif isinstance(layer_spec, MambaSpec) or (
                 isinstance(layer_spec, AttentionSpec)
                 and layer_spec.indexes_kv_by_block_stride
             ):
