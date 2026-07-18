@@ -34,6 +34,29 @@ def test_bind_kv_cache(default_vllm_config):
     assert runner_kv_caches[3] is kv_cache["layers.3.self_attn"]
 
 
+def test_bind_kv_cache_multiple_modules_in_one_layer(default_vllm_config):
+    from vllm.model_executor.layers.attention import Attention
+
+    layer_names = [
+        "model.layers.0.self_attn.attn",
+        "model.layers.0.linear_attn",
+    ]
+    ctx = {
+        layer_name: Attention(32, 128, 0.1, prefix=layer_name)
+        for layer_name in layer_names
+    }
+    kv_cache = {
+        layer_name: torch.tensor([index])
+        for index, layer_name in enumerate(layer_names)
+    }
+    runner_kv_caches: list[torch.Tensor] = []
+
+    bind_kv_cache(kv_cache, ctx, runner_kv_caches)
+
+    assert runner_kv_caches == [kv_cache[name] for name in layer_names]
+    assert all(ctx[name].kv_cache is kv_cache[name] for name in layer_names)
+
+
 def test_bind_kv_cache_non_attention(default_vllm_config):
     from vllm.model_executor.layers.attention import Attention
 
