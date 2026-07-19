@@ -23,6 +23,21 @@ from vllm.utils.collection_utils import LazyDict
 logger = init_logger(__name__)
 
 
+@CustomOp.register("sigmoid_mul")
+class SigmoidMul(CustomOp):
+    """Elementwise multiplication with a sigmoid gate."""
+
+    def __init__(self, *, compile_native: bool = True):
+        super().__init__(compile_native=compile_native)
+
+    @staticmethod
+    def forward_native(
+        input: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> torch.Tensor:
+        return input * torch.sigmoid(gate)
+
+
 @triton.jit
 def _swiglustep_and_mul_kernel(
     o_ptr,

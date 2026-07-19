@@ -23,6 +23,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.activation import SigmoidMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
@@ -267,6 +268,7 @@ class Qwen3NextAttention(nn.Module):
             config, "dual_chunk_attention_config", None
         )
         self.attn_output_gate = getattr(config, "attn_output_gate", True)
+        self.sigmoid_mul = SigmoidMul()
 
         self.qkv_proj = QKVParallelLinear(
             config.hidden_size,
@@ -403,7 +405,7 @@ class Qwen3NextAttention(nn.Module):
         attn_output = self.attn(q, k, v)
         if gate is not None:
             attn_output = attn_output.unflatten(-1, (self.num_heads, self.head_dim))
-            attn_output = attn_output * torch.sigmoid(gate)
+            attn_output = self.sigmoid_mul(attn_output, gate)
             attn_output = attn_output.flatten(-2)
         output[:], _ = self.o_proj(attn_output)
 
