@@ -12,10 +12,12 @@ import torch
 import torch.nn as nn
 from torch.nn.modules.module import register_module_module_registration_hook
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.reload import (
@@ -41,6 +43,88 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 ShardId: TypeAlias = str | int | tuple[int, ...]
+
+
+def try_xcpu_fused_ffn(
+    hidden_states: torch.Tensor,
+    gate_up_proj: nn.Module,
+    down_proj: nn.Module,
+) -> torch.Tensor | None:
+    if not envs.VLLM_XCPU_USE_FUSED_FFN:
+        return None
+
+    if hidden_states.device.type not in ("mcpu", "privateuseone"):
+        return None
+    if hidden_states.dim() != 2:
+        return None
+    if hidden_states.dtype not in (torch.bfloat16, torch.float32):
+        return None
+
+    if getattr(gate_up_proj, "bias", None) is not None:
+        return None
+    if getattr(down_proj, "bias", None) is not None:
+        return None
+    if getattr(gate_up_proj, "gather_output", False):
+        return None
+    if not getattr(down_proj, "input_is_parallel", True):
+        return None
+
+    gate_up_quant = getattr(gate_up_proj, "quant_method", None)
+    down_quant = getattr(down_proj, "quant_method", None)
+    if gate_up_quant.__class__.__name__ != "UnquantizedLinearMethod":
+        return None
+    if down_quant.__class__.__name__ != "UnquantizedLinearMethod":
+        return None
+
+    gate_up_weight = getattr(gate_up_proj, "weight", None)
+    down_weight = getattr(down_proj, "weight", None)
+    if not isinstance(gate_up_weight, torch.Tensor):
+        return None
+    if not isinstance(down_weight, torch.Tensor):
+        return None
+    if gate_up_weight.is_meta or down_weight.is_meta:
+        return None
+    if gate_up_weight.dim() != 2 or down_weight.dim() != 2:
+        return None
+    if gate_up_weight.numel() == 0 or down_weight.numel() == 0:
+        return None
+    if gate_up_weight.dtype != hidden_states.dtype:
+        return None
+    if down_weight.dtype != hidden_states.dtype:
+        return None
+    if gate_up_weight.device != hidden_states.device:
+        return None
+    if down_weight.device != hidden_states.device:
+        return None
+
+    import torch_xcpu
+
+    if not hasattr(torch_xcpu.ops, "fused_ffn"):
+        return None
+
+    output = torch.empty(
+        (hidden_states.size(0), down_weight.size(0)),
+        dtype=hidden_states.dtype,
+        device=hidden_states.device,
+    )
+    torch_xcpu.ops.fused_ffn(
+        output,
+        hidden_states,
+        gate_up_weight,
+        down_weight,
+        bias1=None,
+        bias2=None,
+        activation="silu_mul",
+        trans_w1=True,
+        trans_w2=True,
+    )
+
+    if (
+        getattr(down_proj, "reduce_results", False)
+        and getattr(down_proj, "tp_size", 1) > 1
+    ):
+        output = tensor_model_parallel_all_reduce(output)
+    return output
 
 
 @dataclass

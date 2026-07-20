@@ -67,6 +67,7 @@ from .utils import (
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    try_xcpu_fused_ffn,
 )
 
 logger = init_logger(__name__)
@@ -110,9 +111,11 @@ class Qwen2MoeMLP(nn.Module):
         self.expert_gate = expert_gate
 
     def forward(self, x):
-        gate_up, _ = self.gate_up_proj(x)
-        out = self.act_fn(gate_up)
-        out, _ = self.down_proj(out)
+        out = try_xcpu_fused_ffn(x, self.gate_up_proj, self.down_proj)
+        if out is None:
+            gate_up, _ = self.gate_up_proj(x)
+            out = self.act_fn(gate_up)
+            out, _ = self.down_proj(out)
 
         if self.expert_gate is not None:
             out = F.sigmoid(self.expert_gate(x)[0]) * out

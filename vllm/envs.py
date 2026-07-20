@@ -277,6 +277,7 @@ if TYPE_CHECKING:
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_USE_XCPU_LINEAR: bool = False
+    VLLM_XCPU_USE_FUSED_FFN: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_WSL2_ENABLE_PIN_MEMORY: bool = False
@@ -1941,6 +1942,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
     "VLLM_USE_XCPU_LINEAR": lambda: bool(int(os.getenv("VLLM_USE_XCPU_LINEAR", "0"))),
+    # Use torch_xcpu fused dense FFN for supported XCPU SwiGLU MLP layers.
+    "VLLM_XCPU_USE_FUSED_FFN": lambda: bool(
+        int(os.getenv("VLLM_XCPU_USE_FUSED_FFN", "1"))
+    ),
     # Disable using pytorch's pin memory for CPU offloading.
     "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY", "0"))
