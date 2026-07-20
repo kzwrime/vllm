@@ -131,14 +131,15 @@ def test_force_aot_load(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
-def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("use_mega_aot_artifact", ["0", "1"])
+def test_save_and_load(monkeypatch: pytest.MonkeyPatch, use_mega_aot_artifact: str):
     with monkeypatch.context() as m:
         args = (torch.randn(10, 10),)
 
         with tempfile.TemporaryDirectory() as tmpdirname:
             m.setenv("VLLM_CACHE_ROOT", tmpdirname)
             m.setenv("VLLM_USE_AOT_COMPILE", "1")
-            m.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", "1")
+            m.setenv("VLLM_USE_MEGA_AOT_ARTIFACT", use_mega_aot_artifact)
             m.setenv("VLLM_USE_STANDALONE_COMPILE", "1")
             vllm_config = make_vllm_config()
             with use_vllm_config(vllm_config):
