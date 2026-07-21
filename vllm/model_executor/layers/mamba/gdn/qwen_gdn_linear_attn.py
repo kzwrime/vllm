@@ -1481,7 +1481,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # 2. Recurrent attention
 
         # 2.1: Process the multi-query part
+        direct_spec_output = (
+            current_platform.device_name == "mcpu"
+            and spec_sequence_masks is not None
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_decodes == 0
+        )
         if spec_sequence_masks is not None:
+            spec_out = (
+                core_attn_out[:num_actual_tokens].unsqueeze(0)
+                if direct_spec_output
+                else None
+            )
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
@@ -1500,6 +1511,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ssm_state_indices=spec_state_indices_tensor,
                     num_accepted_tokens=num_accepted_tokens,
                     use_qk_l2norm_in_kernel=True,
+                    out=spec_out,
                 )
             )
         else:
@@ -1600,7 +1612,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             merged_out.index_copy_(1, non_spec_token_indx, core_attn_out_non_spec)
             core_attn_out[:num_actual_tokens] = merged_out.squeeze(0)
         elif spec_sequence_masks is not None:
-            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
+            if not direct_spec_output:
+                core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 
