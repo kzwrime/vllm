@@ -557,6 +557,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.enable_packed_recurrent_decode = (
             envs.VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE
         )
+        self.enable_custom_prefill = envs.VLLM_ENABLE_FLA_CUSTOM_PREFILL
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -1174,19 +1175,39 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             chunk_indices, chunk_offsets = prepare_metadata_cutedsl(cu_seqlens, T)
 
         try:
-            self.chunk_gated_delta_rule(
-                q=q,
-                k=k,
-                v=v,
-                g=g,
-                beta=beta,
-                initial_state=state,
-                output_final_state=True,
-                cu_seqlens=cu_seqlens,
-                # chunk_indices=chunk_indices,
-                # chunk_offsets=chunk_offsets,
-                use_qk_l2norm_in_kernel=False,
-            )
+            if not self.enable_custom_prefill:
+                self.chunk_gated_delta_rule(
+                    q=q,
+                    k=k,
+                    v=v,
+                    g=g,
+                    beta=beta,
+                    initial_state=state,
+                    output_final_state=True,
+                    cu_seqlens=cu_seqlens,
+                    # chunk_indices=chunk_indices,
+                    # chunk_offsets=chunk_offsets,
+                    use_qk_l2norm_in_kernel=False,
+                )
+            else:
+                ssm_state_indices = torch.arange(1, dtype=torch.int32, device=device)
+                has_initial_state = [True]
+                has_initial_state = torch.tensor(
+                    has_initial_state, dtype=torch.bool, device=device
+                )
+                self.chunk_gated_delta_rule(
+                    q=q,
+                    k=k,
+                    v=v,
+                    g=g,
+                    beta=beta,
+                    ssm_state=state,
+                    ssm_state_indices=ssm_state_indices,
+                    has_initial_state=has_initial_state,
+                    cu_seqlens=cu_seqlens,
+                    use_qk_l2norm_in_kernel=False,
+                )
+
         except Exception:
             logger.warning(
                 "GDN prefill kernel warmup (T=%d) failed for "
@@ -1551,26 +1572,42 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefill_has_initial_state = attn_metadata.prefill_has_initial_state
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
-            initial_state = ssm_state[prefill_state_indices]
-            initial_state[~prefill_has_initial_state, ...] = 0
-            (
-                core_attn_out_non_spec,
-                last_recurrent_state,
-            ) = self.chunk_gated_delta_rule(
-                q=query_non_spec,
-                k=key_non_spec,
-                v=value_non_spec,
-                g=g_non_spec,
-                beta=beta_non_spec,
-                initial_state=initial_state,
-                output_final_state=True,
-                cu_seqlens=attn_metadata.prefill_query_start_loc,
-                # chunk_indices=attn_metadata.chunk_indices,
-                # chunk_offsets=attn_metadata.chunk_offsets,
-                use_qk_l2norm_in_kernel=False,
-            )
-            # Init cache
-            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+            if not self.enable_custom_prefill:
+                initial_state = ssm_state[prefill_state_indices]
+                initial_state[~prefill_has_initial_state, ...] = 0
+                (
+                    core_attn_out_non_spec,
+                    last_recurrent_state,
+                ) = self.chunk_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    initial_state=initial_state,
+                    output_final_state=True,
+                    cu_seqlens=attn_metadata.prefill_query_start_loc,
+                    # chunk_indices=attn_metadata.chunk_indices,
+                    # chunk_offsets=attn_metadata.chunk_offsets,
+                    use_qk_l2norm_in_kernel=False,
+                )
+                # Init cache
+                ssm_state[prefill_state_indices] = last_recurrent_state.to(
+                    ssm_state.dtype
+                )
+            else:
+                core_attn_out_non_spec = self.chunk_gated_delta_rule(
+                    q=query_non_spec,
+                    k=key_non_spec,
+                    v=value_non_spec,
+                    g=g_non_spec,
+                    beta=beta_non_spec,
+                    ssm_state=ssm_state,
+                    ssm_state_indices=prefill_state_indices,
+                    has_initial_state=prefill_has_initial_state,
+                    cu_seqlens=attn_metadata.prefill_query_start_loc,
+                    use_qk_l2norm_in_kernel=False,
+                )
 
             if split_non_spec:
                 # Stitch the peeled decode outputs in front of the prefill
