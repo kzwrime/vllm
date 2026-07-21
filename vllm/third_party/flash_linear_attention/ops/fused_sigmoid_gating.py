@@ -196,6 +196,7 @@ def fused_sigmoid_gating_delta_rule_update(
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     is_kda: bool = False,
+    out: torch.Tensor | None = None,
 ):
     """
     Fused triton implementation of sigmoid gating delta rule update.
@@ -222,7 +223,12 @@ def fused_sigmoid_gating_delta_rule_update(
     else:
         assert scale > 0, "scale must be positive"
 
-    o = q.new_empty(NK, *v.shape)
+    if out is None:
+        o = q.new_empty(NK, *v.shape)
+    else:
+        if out.shape != v.shape:
+            raise ValueError(f"Expected out.shape == {v.shape}, got {out.shape}")
+        o = out.unsqueeze(0)
     if inplace_final_state:
         final_state = initial_state
     else:
