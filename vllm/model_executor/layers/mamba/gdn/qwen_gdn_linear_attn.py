@@ -813,6 +813,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         all three splits into a single buffer via ``torch.cat`` so that
         torch.compile emits one Triton copy kernel instead of three separate
         contiguous() calls.
+
+        ---
+
+        XCPU:
+        Split packed qkv into (1, seq, heads, dim) tensors.
+
+        XCPU's recurrent update consumes the packed projection through
+        token-strided views, avoiding three copies and the concatenation used
+        to materialize contiguous q/k/v tensors on other backends.
         """
         if mixed_qkv is None:
             return None, None, None
@@ -823,6 +832,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         v_dim = self.value_dim // self.tp_size
 
         query, key, value = torch.split(mixed_qkv, [q_dim, k_dim, v_dim], dim=-1)
+
+        if current_platform.device_name == "mcpu":
+            query = query.view(1, seq_len, -1, self.head_k_dim)
+            key = key.view(1, seq_len, -1, self.head_k_dim)
+            value = value.view(1, seq_len, -1, self.head_v_dim)
+            return query, key, value
 
         fused = torch.cat(
             [query.reshape(-1), key.reshape(-1), value.reshape(-1)], dim=0
