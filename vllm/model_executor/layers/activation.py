@@ -74,6 +74,22 @@ def swiglustep_and_mul_triton(
     )
 
 
+# --8<-- [start:sigmoid_mul]
+@CustomOp.register("sigmoid_mul")
+class SigmoidMul(CustomOp):
+    """Elementwise multiplication with a sigmoid gate."""
+
+    def __init__(self, *, compile_native: bool = True):
+        super().__init__(compile_native=compile_native)
+
+    @staticmethod
+    def forward_native(
+        input: torch.Tensor,
+        gate: torch.Tensor,
+    ) -> torch.Tensor:
+        return input * torch.sigmoid(gate)
+
+
 # --8<-- [start:fatrelu_and_mul]
 @CustomOp.register("fatrelu_and_mul")
 class FatreluAndMul(CustomOp):
