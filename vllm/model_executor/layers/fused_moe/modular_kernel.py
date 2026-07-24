@@ -1148,6 +1148,30 @@ class FusedMoEKernelModularImpl:
             activation,
         )
 
+        # Some experts implementations write the final output directly and do
+        # not need either intermediate workspace. Allocate their tensors as
+        # ordinary graph-local buffers. Besides avoiding a larger shared
+        # workspace allocation, this keeps WorkspaceManager's Python-side
+        # growth and empty_cache path out of torch.compile full graphs.
+        if prod(workspace13_shape) == 0 and prod(workspace2_shape) == 0:
+            return (
+                torch.empty(
+                    workspace13_shape,
+                    dtype=workspace_dtype,
+                    device=device,
+                ),
+                torch.empty(
+                    workspace2_shape,
+                    dtype=workspace_dtype,
+                    device=device,
+                ),
+                torch.empty(
+                    fused_out_shape,
+                    dtype=out_dtype,
+                    device=device,
+                ),
+            )
+
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
         # Reuse workspace13 for the output since there is only one chunk.
