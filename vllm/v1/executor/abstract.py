@@ -67,9 +67,16 @@ class Executor(ABC):
 
                 executor_class = RayDistributedExecutor
         elif distributed_executor_backend == "mp":
-            from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+            if envs.VLLM_USE_MP_RPC_WORKERS:
+                from vllm.v1.executor.multiproc_rpc_executor import (
+                    MultiprocRPCExecutor,
+                )
 
-            executor_class = MultiprocExecutor
+                executor_class = MultiprocRPCExecutor
+            else:
+                from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+
+                executor_class = MultiprocExecutor
         elif distributed_executor_backend == "uni":
             from vllm.v1.executor.uniproc_executor import UniProcExecutor
 
