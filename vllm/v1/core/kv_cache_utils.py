@@ -1095,7 +1095,8 @@ def unify_kv_cache_spec_page_size(
         return kv_cache_spec
 
     max_page_size = max(page_sizes)
-    # Note: Add new strategy for page_size unification.
+    # Use a common multiple so attention page sizes can be unified by scaling
+    # their block sizes instead of padding pages without changing block sizes.
     for page_size in page_sizes:
         if max_page_size % page_size != 0:
             max_page_size = (max_page_size + page_size - 1) // page_size * page_size
