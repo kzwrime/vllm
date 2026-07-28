@@ -512,12 +512,16 @@ class DFlashQwen3Model(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # --- Fused KV projection (one GEMM for all layers) ---
         normed_context_states = torch.empty_like(context_states)
-        ops.rms_norm(
-            normed_context_states,
-            context_states,
-            self._hidden_norm_weight,
-            self._rms_norm_eps,
-        )
+        # TODO: fix this
+        # ops.rms_norm(
+        #     normed_context_states,
+        #     context_states,
+        #     self._hidden_norm_weight,
+        #     self._rms_norm_eps,
+        # )
+        # 通过 RMSNorm module 进入 XcpuRMSNorm.forward_oot。
+        normed_context_states = self.hidden_norm(context_states)
+
         all_kv_flat = F.linear(
             normed_context_states, self._fused_kv_weight, self._fused_kv_bias
         )
@@ -537,13 +541,22 @@ class DFlashQwen3Model(nn.Module):
         # --- Grouped RMSNorm K across all layers ([L, num_ctx, nkv, hd]) ---
         # The weight is selected per layer by the outermost (layer) index.
         all_k_normed = torch.empty_like(all_k)
-        ops.rms_norm(
-            all_k_normed,
-            all_k,
-            self._k_norm_weights,
-            self._rms_norm_eps,
+        # TODO: fix this
+        # ops.rms_norm(
+        #     all_k_normed,
+        #     all_k,
+        #     self._k_norm_weights,
+        #     self._rms_norm_eps,
+        # )
+        # return all_k_normed
+        # all_k[i] 是 rank-3，符合当前 torch_xcpu RMSNorm 的约束。
+        return torch.stack(
+            [
+                layer.self_attn.k_norm(all_k[i])
+                for i, layer in enumerate(self.layers)
+            ],
+            dim=0,
         )
-        return all_k_normed
 
     def precompute_and_store_context_kv(
         self,
@@ -587,13 +600,22 @@ class DFlashQwen3Model(nn.Module):
         cos_sin_cache = self._rope_cos_sin_cache
         if cos_sin_cache.dtype != all_k_flat.dtype:
             cos_sin_cache = cos_sin_cache.to(dtype=all_k_flat.dtype)
-        ops.rotary_embedding(
+        # TODO: fix this
+        # ops.rotary_embedding(
+        #     positions_repeated,
+        #     all_k_flat,
+        #     None,
+        #     self._rope_head_size,
+        #     cos_sin_cache,
+        #     self._rope_is_neox,
+        # )
+        all_k_flat = all_k_normed.view(L * num_ctx, kv)
+        positions_repeated = context_positions.repeat(L)
+
+        all_k_flat, _ = self.layers[0].self_attn.rotary_emb(
             positions_repeated,
             all_k_flat,
             None,
-            self._rope_head_size,
-            cos_sin_cache,
-            self._rope_is_neox,
         )
 
         if context_slot_mapping is None:

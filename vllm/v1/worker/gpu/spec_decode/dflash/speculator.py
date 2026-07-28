@@ -296,6 +296,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             causal=causal,
         )
 
+    # run
     @torch.inference_mode()
     def propose(
         self,
@@ -618,6 +619,145 @@ def _prepare_dflash_inputs_kernel(
                 tl.store(out_query_slot_mapping_ptr + block, PAD_SLOT_ID, mask=mask)
 
 
+def _prepare_dflash_inputs_python(
+    input_buffers: InputBuffers,
+    query_slot_mapping: torch.Tensor,
+    context_positions: torch.Tensor,
+    context_slot_mapping: torch.Tensor,
+    sample_indices: torch.Tensor,
+    sample_pos: torch.Tensor,
+    sample_idx_mapping: torch.Tensor,
+    input_batch: InputBatch,
+    num_sampled: torch.Tensor,
+    num_rejected: torch.Tensor,
+    last_sampled: torch.Tensor,
+    next_prefill_tokens: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    parallel_drafting_token_id: int,
+    num_query_per_req: int,
+    num_speculative_steps: int,
+    max_num_reqs: int,
+    max_num_tokens: int,
+    max_model_len: int,
+    sample_from_anchor: bool,
+) -> None:
+    """Synchronous Python fallback for the DFlash input preparation kernel."""
+    num_reqs = input_batch.num_reqs
+    num_target_tokens = input_batch.num_tokens
+    num_query_tokens = num_reqs * num_query_per_req
+    assert num_reqs <= max_num_reqs
+    assert num_query_tokens <= max_num_tokens
+
+    target_positions = input_batch.positions[:num_target_tokens].cpu().tolist()
+    target_query_start_loc = (
+        input_batch.query_start_loc[: num_reqs + 1].cpu().tolist()
+    )
+    idx_mapping = input_batch.idx_mapping[:num_reqs].cpu().tolist()
+    num_sampled_values = num_sampled[:num_reqs].cpu().tolist()
+    num_rejected_values = num_rejected[:num_reqs].cpu().tolist()
+    # Triton reads these buffers through flat pointers. In MRV2,
+    # last_sampled has shape [max_num_reqs, 1].
+    last_sampled_values = last_sampled.reshape(-1).cpu().tolist()
+    next_prefill_values = next_prefill_tokens.reshape(-1).cpu().tolist()
+    block_table_values = block_table[:num_reqs].cpu().tolist()
+
+    query_input_ids = [0] * num_query_tokens
+    query_positions = [0] * num_query_tokens
+    query_slots = [PAD_SLOT_ID] * max_num_tokens
+    context_position_values = [0] * num_target_tokens
+    context_slots = [0] * num_target_tokens
+    query_start_locs = [num_query_tokens] * (max_num_reqs + 1)
+    seq_lens = [0] * max_num_reqs
+    sample_indices_values = [0] * (max_num_reqs * num_speculative_steps)
+    sample_pos_values = [0] * (max_num_reqs * num_speculative_steps)
+    sample_mapping_values = [-1] * (max_num_reqs * num_speculative_steps)
+
+    sample_offset = 0 if sample_from_anchor else 1
+    samples_per_req = num_query_per_req - sample_offset
+    assert samples_per_req == num_speculative_steps
+
+    for req_idx in range(num_reqs):
+        req_state_idx = int(idx_mapping[req_idx])
+        ctx_start = int(target_query_start_loc[req_idx])
+        ctx_end = int(target_query_start_loc[req_idx + 1])
+        valid_ctx_end = ctx_end - int(num_rejected_values[req_idx])
+        assert ctx_start < valid_ctx_end <= ctx_end
+
+        bonus_token = (
+            last_sampled_values[req_state_idx]
+            if int(num_sampled_values[req_idx]) > 0
+            else next_prefill_values[req_state_idx]
+        )
+        last_valid_pos = int(target_positions[valid_ctx_end - 1])
+        query_base = req_idx * num_query_per_req
+
+        for ctx_idx in range(ctx_start, ctx_end):
+            position = int(target_positions[ctx_idx])
+            block_num = min(
+                position // block_size,
+                len(block_table_values[req_idx]) - 1,
+            )
+            block_id = int(block_table_values[req_idx][block_num])
+            context_position_values[ctx_idx] = position
+            context_slots[ctx_idx] = block_id * block_size + position % block_size
+
+        for query_offset in range(num_query_per_req):
+            query_idx = query_base + query_offset
+            position = last_valid_pos + 1 + query_offset
+            block_num = min(
+                position // block_size,
+                len(block_table_values[req_idx]) - 1,
+            )
+            block_id = int(block_table_values[req_idx][block_num])
+
+            query_input_ids[query_idx] = (
+                int(bonus_token)
+                if query_offset == 0
+                else parallel_drafting_token_id
+            )
+            query_positions[query_idx] = min(position, max_model_len - 1)
+            query_slots[query_idx] = block_id * block_size + position % block_size
+
+            if query_offset >= sample_offset:
+                sample_idx = (
+                    req_idx * num_speculative_steps + query_offset - sample_offset
+                )
+                sample_indices_values[sample_idx] = query_idx
+                sample_pos_values[sample_idx] = (
+                    position + 1 if sample_from_anchor else position
+                )
+                sample_mapping_values[sample_idx] = req_state_idx
+
+        query_start_locs[req_idx] = query_base
+        seq_lens[req_idx] = last_valid_pos + 1 + num_query_per_req
+
+    def copy_values(dst: torch.Tensor, values: list[int], count: int) -> None:
+        src = torch.tensor(values[:count], dtype=dst.dtype, device="cpu")
+        dst[:count].copy_(src.to(dst.device))
+
+    copy_values(input_buffers.input_ids, query_input_ids, num_query_tokens)
+    copy_values(input_buffers.positions, query_positions, num_query_tokens)
+    copy_values(
+        input_buffers.query_start_loc, query_start_locs, max_num_reqs + 1
+    )
+    copy_values(input_buffers.seq_lens, seq_lens, max_num_reqs)
+    copy_values(query_slot_mapping, query_slots, max_num_tokens)
+    copy_values(context_positions, context_position_values, num_target_tokens)
+    copy_values(context_slot_mapping, context_slots, num_target_tokens)
+    copy_values(
+        sample_indices,
+        sample_indices_values,
+        max_num_reqs * num_speculative_steps,
+    )
+    copy_values(sample_pos, sample_pos_values, max_num_reqs * num_speculative_steps)
+    copy_values(
+        sample_idx_mapping,
+        sample_mapping_values,
+        max_num_reqs * num_speculative_steps,
+    )
+
+
 def prepare_dflash_inputs(
     input_buffers: InputBuffers,
     query_slot_mapping: torch.Tensor,
@@ -648,40 +788,26 @@ def prepare_dflash_inputs(
 ) -> None:
     num_reqs = input_batch.num_reqs
     assert num_reqs > 0
-    # Cover the longest possible per-request span (ctx + query). Use the max
-    # per-request query length, not the total token count across the batch.
-    max_target_query_len = int(input_batch.num_scheduled_tokens.max())
-    max_tokens_per_req = max_target_query_len + num_query_per_req
-    BLOCK_SIZE = min(256, triton.next_power_of_2(max(1, max_tokens_per_req)))
-    num_blocks = triton.cdiv(max_tokens_per_req, BLOCK_SIZE)
-    _prepare_dflash_inputs_kernel[(num_reqs, num_blocks)](
-        input_buffers.input_ids,
-        input_buffers.positions,
-        input_buffers.query_start_loc,
-        input_buffers.seq_lens,
+    _prepare_dflash_inputs_python(
+        input_buffers,
         query_slot_mapping,
         context_positions,
         context_slot_mapping,
         sample_indices,
         sample_pos,
         sample_idx_mapping,
-        input_batch.positions,
-        input_batch.query_start_loc,
-        input_batch.idx_mapping,
-        last_sampled,
-        next_prefill_tokens,
+        input_batch,
         num_sampled,
         num_rejected,
+        last_sampled,
+        next_prefill_tokens,
         block_table,
-        block_table.stride(0),
-        parallel_drafting_token_id,
         block_size,
+        parallel_drafting_token_id,
         num_query_per_req,
         num_speculative_steps,
         max_num_reqs,
         max_num_tokens,
         max_model_len,
-        SAMPLE_FROM_ANCHOR=sample_from_anchor,
-        PAD_SLOT_ID=PAD_SLOT_ID,
-        BLOCK_SIZE=BLOCK_SIZE,
+        sample_from_anchor,
     )
