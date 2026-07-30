@@ -123,6 +123,7 @@ if TYPE_CHECKING:
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
     VLLM_ENABLE_FLA_CUSTOM_PREFILL: bool = True
+    VLLM_XCPU_GDN_COMPILE: bool = False
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
@@ -1174,6 +1175,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_FLA_CUSTOM_PREFILL": lambda: bool(
         int(os.getenv("VLLM_ENABLE_FLA_CUSTOM_PREFILL", "1"))
     ),
+    # XCPU experiment: replace the Python GDN core callback with a native
+    # torch_xcpu operator that dispatches all supported request shapes.
+    "VLLM_XCPU_GDN_COMPILE": lambda: bool(int(os.getenv("VLLM_XCPU_GDN_COMPILE", "0"))),
     # Disable pynccl (using torch.distributed instead)
     "VLLM_DISABLE_PYNCCL": lambda: (
         os.getenv("VLLM_DISABLE_PYNCCL", "False").lower() in ("true", "1")
