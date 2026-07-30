@@ -4,15 +4,18 @@ import math
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from itertools import count
 from itertools import product as iprod
 from typing import Any
 
 import numpy as np
 import torch
 
+from vllm import envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.triton_utils import tl, triton
@@ -24,6 +27,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     MultipleOf,
 )
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
@@ -37,6 +41,8 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
+
+_XCPU_GDN_STATE_HANDLE_COUNTER = count(1)
 
 
 @triton.jit
@@ -520,6 +526,30 @@ def bind_kv_cache(
     for layer_name, kv_cache in kv_caches.items():
         forward_context[layer_name].bind_kv_cache(kv_cache)
 
+    if envs.VLLM_XCPU_GDN_COMPILE:
+        for layer_name, _ in kv_caches.items():
+            layer = forward_context[layer_name]
+            if getattr(layer, "mamba_type", None) == MambaAttentionBackendEnum.GDN_ATTN:
+                kv_cache = layer.kv_cache
+                if (
+                    isinstance(kv_cache, tuple)
+                    and len(kv_cache) == 2
+                    and isinstance(kv_cache[0], torch.Tensor)
+                    and isinstance(kv_cache[1], torch.Tensor)
+                ):
+                    import torch_xcpu.ops_defs.gdn_decode_state  # noqa: F401
+
+                    old_handle = getattr(layer, "_xcpu_gdn_state_handle_025", None)
+                    handle = next(_XCPU_GDN_STATE_HANDLE_COUNTER)
+                    torch.ops.torch_xcpu.register_gdn_decode_state(
+                        handle,
+                        kv_cache[0],
+                        kv_cache[1],
+                        is_conv_state_dim_first(),
+                    )
+                    layer._xcpu_gdn_state_handle_025 = handle
+                    if old_handle is not None:
+                        torch.ops.torch_xcpu.unregister_gdn_decode_state(old_handle)
 
 def copy_kv_cache_blocks_inplace(
     kv_caches: Iterable[torch.Tensor | list[torch.Tensor]],

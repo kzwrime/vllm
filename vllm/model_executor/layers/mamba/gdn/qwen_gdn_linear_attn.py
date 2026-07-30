@@ -900,18 +900,80 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             device=hidden_states.device,
         )
 
-        torch.ops.vllm.qwen_gdn_attention_core(
-            mixed_qkv,
-            b,
-            a,
-            core_attn_out,
-            layer_name=_encode_layer_name(self.prefix),
-        )
+        if self._should_use_xcpu_full_core():
+            self._forward_core_xcpu(
+                mixed_qkv=mixed_qkv,
+                b=b,
+                a=a,
+                core_attn_out=core_attn_out,
+            )
+        else:
+            torch.ops.vllm.qwen_gdn_attention_core(
+                mixed_qkv,
+                b,
+                a,
+                core_attn_out,
+                layer_name=_encode_layer_name(self.prefix),
+            )
 
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
         return self._output_projection(core_attn_out, z)
+
+    def _should_use_xcpu_full_core(self) -> bool:
+        if not envs.VLLM_XCPU_GDN_COMPILE:
+            return False
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        if not isinstance(attn_metadata, dict):
+            return False
+        attn_metadata_i = attn_metadata.get(self.prefix)
+        return isinstance(attn_metadata_i, GDNAttentionMetadata) and (
+            attn_metadata_i.xcpu_runtime_metadata_handle is not None
+        )
+
+    def _forward_core_xcpu(
+        self,
+        mixed_qkv: torch.Tensor,
+        b: torch.Tensor,
+        a: torch.Tensor,
+        core_attn_out: torch.Tensor,
+    ) -> None:
+        forward_context = get_forward_context()
+        attn_metadata = forward_context.attn_metadata
+        assert isinstance(attn_metadata, dict)
+        attn_metadata_i = attn_metadata[self.prefix]
+        assert isinstance(attn_metadata_i, GDNAttentionMetadata)
+
+        metadata_handle = attn_metadata_i.xcpu_runtime_metadata_handle
+        if metadata_handle is None:
+            raise RuntimeError("XCPU GDN full core requires registered metadata.")
+        state_handle = getattr(self, "_xcpu_gdn_state_handle_025", None)
+        if state_handle is None:
+            raise RuntimeError("XCPU GDN full core requires a registered state handle.")
+
+        import torch_xcpu.ops_defs.gdn_decode_state  # noqa: F401
+
+        torch.ops.torch_xcpu.qwen_gdn_attention_core(
+            mixed_qkv,
+            b,
+            a,
+            core_attn_out,
+            self.A_log,
+            self.dt_bias,
+            self.conv1d.weight,
+            self.conv1d.bias,
+            self.head_k_dim**-0.5,
+            state_handle,
+            metadata_handle,
+            self.num_k_heads // self.tp_size,
+            self.head_k_dim,
+            self.head_v_dim,
+            self.enable_packed_recurrent_decode,
+            self.enable_custom_prefill,
+            self.activation in ("silu", "swish"),
+        )
 
     def forward_xpu(
         self,
