@@ -13,8 +13,12 @@ import pytest
 import torch
 
 from vllm.model_executor.kernels.linear import (
+    _POSSIBLE_FP8_BLOCK_KERNELS,
+    _POSSIBLE_FP8_KERNELS,
     AiterInt8ScaledMMLinearKernel,
     CPUInt8ScaledMMLinearKernel,
+    Fp8BlockScaledMMLinearKernel,
+    FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
     ScaledMMLinearKernel,
@@ -116,6 +120,29 @@ class OOTInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         pass
 
 
+class OOTFp8BlockScaledMMLinearKernel(Fp8BlockScaledMMLinearKernel):
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        return True, None
+
+    @classmethod
+    def can_implement(
+        cls, config: FP8ScaledMMLinearLayerConfig
+    ) -> tuple[bool, str | None]:
+        return True, None
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        return A
+
+
 @patch("vllm.model_executor.kernels.linear.current_platform")
 def test_register_oot_linear_kernel(platform_mock):
     """Test that the linear kernel registration works correctly."""
@@ -127,3 +154,28 @@ def test_register_oot_linear_kernel(platform_mock):
     assert isinstance(kernel, OOTInt8ScaledMMLinearKernel), (
         "init_int8_linear_kernel should return an instance of the registered kernel"
     )
+
+
+def test_register_oot_fp8_block_linear_kernel():
+    kernels = _POSSIBLE_FP8_BLOCK_KERNELS.setdefault(PlatformEnum.OOT, [])
+    standard_kernels = _POSSIBLE_FP8_KERNELS.setdefault(PlatformEnum.OOT, [])
+    original = list(kernels)
+    original_standard = list(standard_kernels)
+    try:
+        kernels[:] = [
+            kernel
+            for kernel in kernels
+            if kernel is not OOTFp8BlockScaledMMLinearKernel
+        ]
+
+        register_linear_kernel(
+            OOTFp8BlockScaledMMLinearKernel,
+            PlatformEnum.OOT,
+            "fp8_block",
+        )
+
+        assert kernels.count(OOTFp8BlockScaledMMLinearKernel) == 1
+        assert standard_kernels == original_standard
+    finally:
+        kernels[:] = original
+        standard_kernels[:] = original_standard
