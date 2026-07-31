@@ -169,7 +169,6 @@ if TYPE_CHECKING:
     VLLM_USE_BREAKABLE_CUDAGRAPH: bool = False
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
-    VLLM_ENABLE_SEQUENCE_PARALLEL_MOE: bool = True
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
     VLLM_RAY_DP_PLACEMENT_NODE_IPS: str = ""
@@ -1398,11 +1397,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DP_MASTER_IP": lambda: os.getenv("VLLM_DP_MASTER_IP", "127.0.0.1"),
     # Port of the master node in the data parallel setting
     "VLLM_DP_MASTER_PORT": lambda: int(os.getenv("VLLM_DP_MASTER_PORT", "0")),
-    # Whether to enable sequence parallel for MoE models.
-    # Setting to "0" disables sequence parallel for MoE.
-    "VLLM_ENABLE_SEQUENCE_PARALLEL_MOE": lambda: bool(
-        int(os.getenv("VLLM_ENABLE_SEQUENCE_PARALLEL_MOE", "1"))
-    ),
     # Randomize inputs during dummy runs when using Data Parallel
     "VLLM_RANDOMIZE_DP_DUMMY_INPUTS": lambda: (
         os.environ.get("VLLM_RANDOMIZE_DP_DUMMY_INPUTS", "0") == "1"
