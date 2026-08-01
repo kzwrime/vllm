@@ -117,7 +117,12 @@ class TopKWeightAndReduceContiguous(mk.TopKWeightAndReduce):
             f"Expected output size {(m, k)}. But got {output.size()}"
         )
 
-        ops.moe_sum(fused_expert_output, output)
+        if hasattr(torch.ops._moe_C, "moe_sum"):
+            ops.moe_sum(fused_expert_output, output)
+        else:
+            # Non-CUDA platforms may use Modular MoE without building
+            # vLLM's CUDA-only _moe_C extension.
+            torch.sum(fused_expert_output, dim=1, out=output)
         return output
 
 
