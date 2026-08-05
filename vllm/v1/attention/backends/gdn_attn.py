@@ -3,10 +3,12 @@
 """Backend for GatedDeltaNet attention."""
 
 from dataclasses import dataclass
+from itertools import count
 from typing import Literal
 
 import torch
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
@@ -22,6 +24,8 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
+
+_XCPU_GDN_METADATA_HANDLE_COUNTER = count(1)
 
 
 class GDNAttentionBackend(AttentionBackend):
@@ -47,6 +51,7 @@ class GDNAttentionMetadata:
     num_spec_decodes: int
     num_spec_decode_tokens: int
     num_actual_tokens: int
+    xcpu_runtime_metadata_handle: int | None = None
 
     has_initial_state: torch.Tensor | None = None
 
@@ -96,6 +101,11 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
         self.kv_cache_spec = kv_cache_spec
+        self._xcpu_runtime_metadata_handle = (
+            next(_XCPU_GDN_METADATA_HANDLE_COUNTER)
+            if envs.VLLM_XCPU_GDN_COMPILE
+            else None
+        )
         from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
             _resolve_gdn_prefill_backend,
         )
@@ -492,6 +502,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             num_spec_decodes=num_spec_decodes,
             num_spec_decode_tokens=num_spec_decode_tokens,
             num_actual_tokens=m.num_actual_tokens,
+            xcpu_runtime_metadata_handle=self._xcpu_runtime_metadata_handle,
             has_initial_state=has_initial_state,
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,
@@ -510,6 +521,28 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
+        if self._xcpu_runtime_metadata_handle is not None:
+            import torch_xcpu.ops_defs.gdn_decode_state  # noqa: F401
+
+            torch.ops.torch_xcpu.set_gdn_runtime_metadata(
+                self._xcpu_runtime_metadata_handle,
+                num_prefills,
+                num_decodes,
+                num_spec_decodes,
+                m.num_actual_tokens,
+                num_decode_tokens,
+                has_initial_state,
+                spec_query_start_loc,
+                non_spec_query_start_loc,
+                spec_state_indices_tensor,
+                non_spec_state_indices_tensor,
+                spec_token_indx,
+                non_spec_token_indx,
+                num_accepted_tokens,
+                prefill_query_start_loc,
+                prefill_state_indices,
+                prefill_has_initial_state,
+            )
         return attn_metadata
 
     def build_for_cudagraph_capture(
