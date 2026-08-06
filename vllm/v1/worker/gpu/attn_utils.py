@@ -362,6 +362,31 @@ def _reshape_kv_cache(
             cache_dtype=cache_dtype,
             kv_cache_config=kv_cache_config,
         )
+    # For torch compile:
+    #   Packed hybrid-cache groups can intentionally expose the exact same
+    #   physical cache to several layers. Reuse one Tensor object for identical
+    #   views so AOTAutograd sees one mutable input instead of multiple views
+    #   different autograd bases over the same storage.
+    canonical_attention_views: dict[tuple[Any, ...], torch.Tensor] = {}
+    attention_layer_names = (
+        layer_name
+        for group in attn_groups
+        if isinstance(group.kv_cache_spec, AttentionSpec)
+        for layer_name in group.layer_names
+    )
+    for layer_name in attention_layer_names:
+        kv_cache = kv_caches.get(layer_name)
+        if not isinstance(kv_cache, torch.Tensor):
+            continue
+        view_key = (
+            kv_cache.untyped_storage().data_ptr(),
+            kv_cache.storage_offset(),
+            tuple(kv_cache.shape),
+            kv_cache.stride(),
+            kv_cache.dtype,
+            kv_cache.device,
+        )
+        kv_caches[layer_name] = canonical_attention_views.setdefault(view_key, kv_cache)
 
     # Map any sharing layers to their target layer's KV cache.
     for layer_name, target_layer_name in shared_kv_cache_layers.items():

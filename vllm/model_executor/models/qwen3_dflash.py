@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import Qwen3Config
 
-from vllm import _custom_ops as ops
+from vllm import ir
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -511,9 +511,7 @@ class DFlashQwen3Model(nn.Module):
         head_dim: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # --- Fused KV projection (one GEMM for all layers) ---
-        normed_context_states = torch.empty_like(context_states)
-        ops.rms_norm(
-            normed_context_states,
+        normed_context_states = ir.ops.rms_norm(
             context_states,
             self._hidden_norm_weight,
             self._rms_norm_eps,
@@ -536,14 +534,11 @@ class DFlashQwen3Model(nn.Module):
     def _normalize_context_k(self, all_k: torch.Tensor) -> torch.Tensor:
         # --- Grouped RMSNorm K across all layers ([L, num_ctx, nkv, hd]) ---
         # The weight is selected per layer by the outermost (layer) index.
-        all_k_normed = torch.empty_like(all_k)
-        ops.rms_norm(
-            all_k_normed,
+        return ir.ops.rms_norm(
             all_k,
             self._k_norm_weights,
             self._rms_norm_eps,
         )
-        return all_k_normed
 
     def precompute_and_store_context_kv(
         self,
@@ -587,13 +582,10 @@ class DFlashQwen3Model(nn.Module):
         cos_sin_cache = self._rope_cos_sin_cache
         if cos_sin_cache.dtype != all_k_flat.dtype:
             cos_sin_cache = cos_sin_cache.to(dtype=all_k_flat.dtype)
-        ops.rotary_embedding(
+        all_k_flat, _ = self.layers[0].self_attn.rotary_emb(
             positions_repeated,
             all_k_flat,
             None,
-            self._rope_head_size,
-            cos_sin_cache,
-            self._rope_is_neox,
         )
 
         if context_slot_mapping is None:
@@ -602,10 +594,26 @@ class DFlashQwen3Model(nn.Module):
         # --- Per-layer cache insert ---
         all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
         per_layer = isinstance(context_slot_mapping, (list, tuple))
-        for i in range(L):
-            slot_mapping = (
-                context_slot_mapping[i] if per_layer else context_slot_mapping
+        slot_mappings = [
+            context_slot_mapping[i] if per_layer else context_slot_mapping
+            for i in range(L)
+        ]
+        grouped_update = getattr(
+            self._attn_layers[0].impl,
+            "do_kv_cache_update_grouped",
+            None,
+        )
+        if grouped_update is not None:
+            grouped_update(
+                self._attn_layers,
+                all_k_final,
+                all_v,
+                slot_mappings,
             )
+            return
+
+        for i in range(L):
+            slot_mapping = slot_mappings[i]
             if slot_mapping is None:
                 continue  # dummy run: skip cache ops
             attn = self._attn_layers[i]
