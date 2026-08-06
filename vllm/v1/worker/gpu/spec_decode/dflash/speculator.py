@@ -375,31 +375,31 @@ class DFlashSpeculator(DraftModelSpeculator):
         # The query slot mapping is written into the shared BlockTables slot_mappings.
         # That buffer's address is what the captured CUDA graph reads from at replay.
         assert self.draft_kv_cache_group_id >= 0
-        # Support multiple draft KV cache groups by preparing inputs once for each
-        for i, gid in enumerate(self.draft_kv_cache_group_ids):
-            prepare_dflash_inputs(
-                self.input_buffers,
-                self.block_tables.slot_mappings[gid],
-                self.context_positions,
-                self._context_slot_mappings[i],
-                self.sample_indices,
-                self.sample_pos,
-                self.sample_idx_mapping,
-                input_batch,
-                num_sampled,
-                num_rejected,
-                last_sampled,
-                next_prefill_tokens,
-                self.block_tables.input_block_tables[gid],
-                self.block_tables.kernel_block_sizes[gid],
-                self.parallel_drafting_token_id,
-                self.num_query_per_req,
-                self.num_speculative_steps,
-                self.max_num_reqs,
-                self.max_num_tokens,
-                self.max_model_len,
-                self.sample_from_anchor,
-            )
+        # Note: Replace to one func call
+        prepare_dflash_inputs_for_groups(
+            self.input_buffers,
+            self.block_tables.slot_mappings,
+            self.context_positions,
+            self._context_slot_mappings,
+            self.sample_indices,
+            self.sample_pos,
+            self.sample_idx_mapping,
+            input_batch,
+            num_sampled,
+            num_rejected,
+            last_sampled,
+            next_prefill_tokens,
+            self.block_tables.input_block_tables,
+            self.block_tables.kernel_block_sizes,
+            self.draft_kv_cache_group_ids,
+            self.parallel_drafting_token_id,
+            self.num_query_per_req,
+            self.num_speculative_steps,
+            self.max_num_reqs,
+            self.max_num_tokens,
+            self.max_model_len,
+            self.sample_from_anchor,
+        )
 
         # Pre-insert context K/V into the cache. Runs eagerly outside the captured graph
         # because the context shape varies per step. During dummy runs the block tables
@@ -685,3 +685,54 @@ def prepare_dflash_inputs(
         PAD_SLOT_ID=PAD_SLOT_ID,
         BLOCK_SIZE=BLOCK_SIZE,
     )
+
+
+def prepare_dflash_inputs_for_groups(
+    input_buffers: InputBuffers,
+    query_slot_mappings: torch.Tensor,
+    context_positions: torch.Tensor,
+    context_slot_mappings: torch.Tensor,
+    sample_indices: torch.Tensor,
+    sample_pos: torch.Tensor,
+    sample_idx_mapping: torch.Tensor,
+    input_batch: InputBatch,
+    num_sampled: torch.Tensor,
+    num_rejected: torch.Tensor,
+    last_sampled: torch.Tensor,
+    next_prefill_tokens: torch.Tensor,
+    block_tables: list[torch.Tensor],
+    block_sizes: list[int],
+    group_ids: list[int],
+    parallel_drafting_token_id: int,
+    num_query_per_req: int,
+    num_speculative_steps: int,
+    max_num_reqs: int,
+    max_num_tokens: int,
+    max_model_len: int,
+    sample_from_anchor: bool = False,
+) -> None:
+    assert context_slot_mappings.shape[0] == len(group_ids)
+    for group_idx, group_id in enumerate(group_ids):
+        prepare_dflash_inputs(
+            input_buffers,
+            query_slot_mappings[group_id],
+            context_positions,
+            context_slot_mappings[group_idx],
+            sample_indices,
+            sample_pos,
+            sample_idx_mapping,
+            input_batch,
+            num_sampled,
+            num_rejected,
+            last_sampled,
+            next_prefill_tokens,
+            block_tables[group_id],
+            block_sizes[group_id],
+            parallel_drafting_token_id,
+            num_query_per_req,
+            num_speculative_steps,
+            max_num_reqs,
+            max_num_tokens,
+            max_model_len,
+            sample_from_anchor,
+        )
