@@ -97,6 +97,38 @@ class DSparkSpeculator(DFlashSpeculator):
             )
         return model
 
+    def _sample_logits(
+        self,
+        logits: torch.Tensor,
+        idx_map: torch.Tensor,
+        sample_pos: torch.Tensor,
+        step: int,
+    ) -> torch.Tensor:
+        if self.draft_logits is None:
+            return self.model.map_draft_to_target(logits.argmax(dim=-1))
+
+        # Probabilistic sampling and rejection operate in target-vocabulary
+        # space. A reduced draft vocabulary is scattered into its target rows.
+        if self._d2t_scatter_index is not None:
+            assert self._draft_scatter_buf is not None
+            buf = self._draft_scatter_buf[: logits.shape[0]]
+            buf.index_copy_(1, self._d2t_scatter_index, logits.to(buf.dtype))
+            logits = buf
+
+        # sample_pos is the predicted token's position Q; the target verifies
+        # it with the predecessor's Gumbel key (Q-1). Pass Q-1.
+        return gumbel_sample(
+            logits,
+            idx_map,
+            self.temperature,
+            self.seeds,
+            sample_pos - 1,
+            apply_temperature=True,
+            logits_cache=self.draft_logits,
+            logits_cache_col=self._step_cols[step],
+            use_fp64=self.use_fp64_gumbel,
+        )
+
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
         # Sequential Markov sampling over the backbone's output hidden states.
         n_spec = self.num_speculative_steps
