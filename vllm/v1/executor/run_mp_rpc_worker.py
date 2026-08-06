@@ -130,8 +130,12 @@ def rpc_worker_main(
             assert isinstance(config_obj, dict), "Config should be a dict"
             config_dict: dict[str, Any] = config_obj
 
-            # Apply VLLM_* env overrides (skip VLLM_LOOPBACK_IP)
-            skip_envs = {"VLLM_LOOPBACK_IP"}
+            # Apply executor VLLM_* env overrides, except node-local network
+            # identity.  Remote workers must retain the addresses selected by
+            # their own launcher; copying the executor's VLLM_HOST_IP makes a
+            # worker bind ZMQ sockets to an address that does not exist on its
+            # host.
+            skip_envs = {"VLLM_LOOPBACK_IP", "VLLM_HOST_IP"}
             for k, v in config_dict.get("vllm_envs", {}).items():
                 if k in skip_envs:
                     continue

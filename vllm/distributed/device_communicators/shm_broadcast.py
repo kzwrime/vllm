@@ -800,17 +800,21 @@ class MessageQueue:
             if overflow:
                 obj = MessageQueue.recv(self.local_socket, timeout)
         elif self._is_remote_reader:
-            obj = MessageQueue.recv(self.remote_socket, timeout)
+            # Detach remote messages from libzmq's shared decoder batch before
+            # unpickling. Keeping zero-copy Frames alive through pickle's
+            # out-of-band buffers can pin an entire decoder batch for a small
+            # payload and inflate the allocator's resident high-water mark.
+            obj = MessageQueue.recv(self.remote_socket, timeout, copy=True)
         else:
             raise RuntimeError("Only readers can dequeue")
         return obj
 
     @staticmethod
-    def recv(socket: zmq.Socket, timeout: float | None) -> Any:
+    def recv(socket: zmq.Socket, timeout: float | None, *, copy: bool = False) -> Any:
         timeout_ms = None if timeout is None else int(timeout * 1000)
         if not socket.poll(timeout=timeout_ms):
             raise TimeoutError
-        recv, *recv_oob = socket.recv_multipart(copy=False)
+        recv, *recv_oob = socket.recv_multipart(copy=copy)
         return pickle.loads(recv, buffers=recv_oob)
 
     def broadcast_object(self, obj=None):
