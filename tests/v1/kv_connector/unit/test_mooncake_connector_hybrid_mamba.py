@@ -139,13 +139,14 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
         worker = connector.connector_worker
 
         fa_cache = torch.empty((2, 2, 11), dtype=torch.float16)
-        gdn_conv_state = torch.empty((2, 22), dtype=torch.float16)
-        gdn_ssm_state = torch.empty((2, 4), dtype=torch.float16)
+        gdn_spec = kv_cache_config.kv_cache_groups[1].kv_cache_spec
+        assert isinstance(gdn_spec, MambaSpec)
+        gdn_cache = torch.empty((3, 1, 1, gdn_spec.page_size_bytes), dtype=torch.int8)
 
         worker.register_kv_caches(
             {
                 "model.layers.0.self_attn": fa_cache,
-                "model.layers.1.linear_attn": (gdn_conv_state, gdn_ssm_state),
+                "model.layers.1.linear_attn": gdn_cache,
             }
         )
 
@@ -157,8 +158,9 @@ def test_register_kv_caches_emits_fa_and_gdn_regions(monkeypatch):
         assert worker.registered_group_indices == [0, 1]
         assert worker.kv_caches_base_addr == [
             fa_cache.data_ptr(),
-            gdn_conv_state.data_ptr(),
+            gdn_cache.data_ptr(),
         ]
+        assert worker.block_len_per_layer[1] == gdn_spec.page_size_bytes
 
         worker.shutdown()
         worker.shutdown = noop_shutdown
@@ -183,10 +185,13 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
         )
         worker = connector.connector_worker
 
-        backing = torch.empty((4, 64), dtype=torch.float16)
-        fa_cache = backing[:2, :16]
-        gdn_conv_state = backing[:3]
-        gdn_ssm_state = torch.empty((3, 4), dtype=torch.float16)
+        gdn_spec = kv_cache_config.kv_cache_groups[1].kv_cache_spec
+        assert isinstance(gdn_spec, MambaSpec)
+        backing = torch.empty(512, dtype=torch.int8)
+        fa_cache = backing[:64].view(torch.float16).view(2, 16)
+        gdn_cache = backing[: 3 * gdn_spec.page_size_bytes].view(
+            3, 1, 1, gdn_spec.page_size_bytes
+        )
 
         with patch.object(
             worker.engine, "batch_register_memory", return_value=0
@@ -194,13 +199,13 @@ def test_register_kv_caches_deduplicates_shared_backing_memory(monkeypatch):
             worker.register_kv_caches(
                 {
                     "model.layers.0.self_attn": fa_cache,
-                    "model.layers.1.linear_attn": (gdn_conv_state, gdn_ssm_state),
+                    "model.layers.1.linear_attn": gdn_cache,
                 }
             )
 
         assert worker.kv_caches_base_addr == [
             fa_cache.data_ptr(),
-            gdn_conv_state.data_ptr(),
+            gdn_cache.data_ptr(),
         ]
         batch_register_memory.assert_called_once()
         registered_ptrs, registered_lens = batch_register_memory.call_args[0]

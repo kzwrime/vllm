@@ -1674,13 +1674,9 @@ class MooncakeConnectorWorker:
                     layer_name,
                 )
                 continue
-            if isinstance(layer_spec, MambaSpec):
-                conv, _ = cache_or_caches
-                cache_list = [conv]
-            else:
-                # K and V are packed into one blocks-first tensor per layer,
-                # so each layer registers as a single region.
-                cache_list = [cache_or_caches]
+            # Attention K/V and Mamba states are packed into one blocks-first
+            # tensor per layer, so each layer registers as a single region.
+            cache_list = [cache_or_caches]
 
             logger.debug(
                 "registering layer %s with %d cache tensor(s)",
