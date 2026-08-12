@@ -307,7 +307,8 @@ class RMSNormGated(CustomOp):
         return self.forward_cuda(x, z)
 
 
-class LayerNorm(nn.Module):
+@CustomOp.register("layer_norm")
+class LayerNorm(CustomOp):
     """
     Layer Normalization.
     """
@@ -319,7 +320,7 @@ class LayerNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.bias = nn.Parameter(torch.zeros(dim, dtype=torch.float32))
 
-    def forward(self, x: torch.Tensor):
+    def forward_native(self, x: torch.Tensor):
         return F.layer_norm(
             x.float(), (self.dim,), self.weight, self.bias, self.eps
         ).type_as(x)
