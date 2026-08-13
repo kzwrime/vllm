@@ -382,6 +382,93 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
     assert cfg.scheduler_config.async_scheduling is True
 
 
+def test_data_parallel_rpc_port_has_fixed_default():
+    assert ParallelConfig().data_parallel_rpc_port == 29550
+
+
+@pytest.mark.parametrize("port", [1, 29550, 65535])
+def test_data_parallel_rpc_port_accepts_valid_ports(port: int):
+    assert ParallelConfig(data_parallel_rpc_port=port).data_parallel_rpc_port == port
+
+
+@pytest.mark.parametrize("port", [-1, 0, 65536])
+def test_data_parallel_rpc_port_rejects_invalid_ports(port: int):
+    with pytest.raises(ValidationError):
+        ParallelConfig(data_parallel_rpc_port=port)
+
+
+def test_reconfigure_for_independent_dp_rank_on_multinode_dense_model():
+    parallel_config = ParallelConfig(
+        tensor_parallel_size=8,
+        data_parallel_size=2,
+        data_parallel_size_local=1,
+        data_parallel_rank=1,
+        distributed_executor_backend="mp",
+        nnodes=2,
+        node_rank=1,
+    )
+
+    assert parallel_config.nnodes_within_dp == 1
+    assert parallel_config.node_rank_within_dp == 0
+
+    parallel_config.reconfigure_for_independent_dp_rank()
+
+    assert parallel_config.data_parallel_size == 1
+    assert parallel_config.data_parallel_size_local == 1
+    assert parallel_config.data_parallel_rank == 0
+    assert parallel_config.data_parallel_index == 1
+    assert parallel_config.nnodes == 1
+    assert parallel_config.node_rank == 0
+    assert parallel_config.world_size == 8
+
+
+def test_draft_model_enables_async_scheduling_by_default():
+    parallel_config = ParallelConfig(distributed_executor_backend="uni")
+    model_config = ModelConfig("Qwen/Qwen3-0.6B", max_model_len=2048)
+    speculative_config = SpeculativeConfig(
+        method="draft_model",
+        model="Qwen/Qwen3-0.6B",
+        num_speculative_tokens=3,
+        target_model_config=model_config,
+        target_parallel_config=parallel_config,
+    )
+    cfg = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_model_len=2048,
+            is_encoder_decoder=False,
+        ),
+        parallel_config=parallel_config,
+        speculative_config=speculative_config,
+    )
+
+    assert cfg.scheduler_config.async_scheduling is True
+
+
+@pytest.mark.parametrize(
+    ("method", "parallel_drafting", "expected_slots"),
+    [
+        pytest.param("eagle3", False, 0, id="eagle3"),
+        pytest.param("eagle3", True, 7, id="p-eagle"),
+        pytest.param("dflash", True, 8, id="dflash"),
+        pytest.param("dspark", True, 7, id="dspark"),
+        pytest.param("mtp", False, 0, id="mtp"),
+        pytest.param("ngram", False, 0, id="ngram"),
+        pytest.param("draft_model", False, 1, id="draft-model"),
+        pytest.param("draft_model", True, 8, id="pard"),
+    ],
+)
+def test_max_num_new_slots_for_drafting(method, parallel_drafting, expected_slots):
+    speculative_config = SpeculativeConfig(
+        model="ngram",
+        num_speculative_tokens=8,
+    )
+    speculative_config.method = method
+    speculative_config.parallel_drafting = parallel_drafting
+
+    assert speculative_config.max_num_new_slots_for_drafting == expected_slots
+
+
 @dataclass
 class _TestConfigFields:
     a: int
