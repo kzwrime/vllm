@@ -27,7 +27,11 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
+
+try:
+    from vllm.vllm_flash_attn.flash_attn_interface import flash_attn_varlen_func
+except (ImportError, ModuleNotFoundError):
+    flash_attn_varlen_func = None  # type: ignore[assignment]
 
 
 class FlashAttnMLASparseBackend(AttentionBackend):
