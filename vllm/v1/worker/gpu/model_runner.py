@@ -47,6 +47,7 @@ from vllm.multimodal.encoder_budget import (
     MultiModalBudget,
     get_dummy_encoder_profile_inputs,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
@@ -576,6 +577,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert self.intermediate_tensors is not None
             intermediate_tensors = self.intermediate_tensors[:num_tokens]
 
+        enable_xcpu_moe_dummy_run = (
+            envs.VLLM_XCPU_ENABLE_DUMMY_RUN_FAST_PATH
+            and current_platform.device_name == "mcpu"
+            and self.vllm_config.parallel_config.data_parallel_size > 1
+            and self.vllm_config.parallel_config.is_moe_model is not False
+            and not is_profile
+            and not skip_eplb
+            and num_tokens <= 1
+        )
+        from torch_xcpu import ops as xcpu_ops
+
+        previous_xcpu_dummy_run = False
+        if enable_xcpu_moe_dummy_run:
+            previous_xcpu_dummy_run = bool(xcpu_ops.is_dummy_run())
+            xcpu_ops.set_dummy_run(True)
+
         max_loras = self.lora_config.max_loras if self.lora_config is not None else 0
         with self.maybe_dummy_run_with_lora(
             self.lora_config,
@@ -592,6 +609,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_attn_for_dummy_run=skip_attn,
                 is_profile=is_profile,
             )
+        xcpu_ops.set_dummy_run(previous_xcpu_dummy_run)
         self.kv_connector.set_disabled(False)
 
         # Non-last PP ranks don't produce output for sampling.
