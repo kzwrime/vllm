@@ -68,12 +68,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
+    scaled_dequantize,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
     cutlass_fp8_supported,
     normalize_e4m3fn_to_e4m3fnuz,
 )
+from vllm.model_executor.layers.utils import default_unquantized_gemm
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     PerTensorScaleParameter,
@@ -191,7 +193,19 @@ class Fp8Config(QuantizationConfig):
                 online_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
                 return online_method
             else:
-                offline_method = Fp8LinearMethod(self)
+                # MLA consumes kv_b_proj both as a regular linear weight during
+                # prefill and as split W_UK/W_UV tensors during decode. On a
+                # platform without native FP8 compute, retaining FP8 here adds
+                # conversion cost and also exposes MLA to backend-packed weights.
+                dequantize_after_loading = (
+                    self.weight_block_size is not None
+                    and prefix.rsplit(".", 1)[-1] == "kv_b_proj"
+                    and not current_platform.supports_fp8()
+                )
+                offline_method = Fp8LinearMethod(
+                    self,
+                    dequantize_after_loading=dequantize_after_loading,
+                )
                 offline_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
                 return offline_method
         elif isinstance(layer, RoutedExperts):
@@ -277,8 +291,13 @@ class Fp8LinearMethod(LinearMethodBase):
         quant_config: The quantization config.
     """
 
-    def __init__(self, quant_config: Fp8Config):
+    def __init__(
+        self,
+        quant_config: Fp8Config,
+        dequantize_after_loading: bool = False,
+    ):
         self.quant_config = quant_config
+        self.dequantize_after_loading = dequantize_after_loading
         self.is_scale_e8m0 = getattr(quant_config, "is_scale_e8m0", False)
         self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
         self.out_dtype = torch.get_default_dtype()
@@ -384,6 +403,13 @@ class Fp8LinearMethod(LinearMethodBase):
             set_weight_attrs(scale, {"scale_type": "input_scale"})
             layer.register_parameter("input_scale", scale)
 
+        if self.dequantize_after_loading:
+            # The serialized parameters and their loaders are still created as
+            # FP8 above. No execution kernel is needed after they are converted
+            # to the model dtype in process_weights_after_loading().
+            self.fp8_linear = None
+            return
+
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
             weight_quant_key=self.weight_quant_key,
@@ -396,6 +422,19 @@ class Fp8LinearMethod(LinearMethodBase):
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.dequantize_after_loading:
+            assert self.block_quant
+            weight = scaled_dequantize(
+                layer.weight,
+                layer.weight_scale_inv,
+                group_shape=GroupShape(*layer.weight_block_size),
+                out_dtype=layer.orig_dtype,
+            )
+            replace_parameter(layer, "weight", weight)
+            layer.input_scale = None
+            return
+
+        assert self.fp8_linear is not None
         if self.use_marlin:
             if not self.block_quant:
                 # Canonicalize to (K, N) for the kernel.
@@ -449,6 +488,10 @@ class Fp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.dequantize_after_loading:
+            return default_unquantized_gemm(layer, x, layer.weight, bias)
+
+        assert self.fp8_linear is not None
         # if batch invariant mode is enabled, prefer direct FP8 path
         # we will use BF16 dequant when direct FP8 is not supported.
         if envs.VLLM_BATCH_INVARIANT:

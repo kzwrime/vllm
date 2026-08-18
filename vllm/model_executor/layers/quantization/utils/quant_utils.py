@@ -425,6 +425,13 @@ def get_and_maybe_dequant_weights(
     ):
         return weight.to(out_dtype)
 
+    # Selected MLA weights may be eagerly restored to the model dtype on
+    # platforms without native FP8 compute.
+    if isinstance(layer.quant_method, Fp8LinearMethod) and getattr(
+        layer.quant_method, "dequantize_after_loading", False
+    ):
+        return weight.to(out_dtype)
+
     # Simple Fp8 case: rescale with tensor or block weight scales
     if (
         isinstance(

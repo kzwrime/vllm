@@ -32,6 +32,10 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    get_and_maybe_dequant_weights,
+    scaled_dequantize,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
 
@@ -431,6 +435,50 @@ def test_fp8_reloading(
         weight_loader(param, torch.zeros(shape))  # cannot use empty
 
     method.process_weights_after_loading(layer)
+
+
+def test_block_fp8_linear_can_dequantize_before_backend_processing():
+    weight = torch.tensor(
+        [
+            [1.0, 2.0, 3.0, 4.0],
+            [5.0, 6.0, 7.0, 8.0],
+            [9.0, 10.0, 11.0, 12.0],
+            [13.0, 14.0, 15.0, 16.0],
+        ],
+        dtype=torch.float8_e4m3fn,
+    )
+    scale = torch.tensor([[0.5, 1.0], [1.5, 2.0]], dtype=torch.float32)
+    expected = scaled_dequantize(
+        weight,
+        scale,
+        group_shape=(2, 2),
+        out_dtype=torch.bfloat16,
+    )
+
+    method = object.__new__(Fp8LinearMethod)
+    method.dequantize_after_loading = True
+    method.block_quant = True
+    method.use_marlin = False
+    method.use_deep_gemm = False
+
+    layer = torch.nn.Module()
+    layer.register_parameter(
+        "weight", torch.nn.Parameter(weight.clone(), requires_grad=False)
+    )
+    layer.register_parameter(
+        "weight_scale_inv", torch.nn.Parameter(scale.clone(), requires_grad=False)
+    )
+    layer.weight_block_size = (2, 2)
+    layer.orig_dtype = torch.bfloat16
+    layer.quant_method = method
+
+    method.process_weights_after_loading(layer)
+
+    assert layer.weight.dtype == torch.bfloat16
+    torch.testing.assert_close(layer.weight, expected)
+    torch.testing.assert_close(
+        get_and_maybe_dequant_weights(layer, torch.bfloat16), expected
+    )
 
 
 @pytest.mark.parametrize("source", ["checkpoint", "runtime_calc"])
