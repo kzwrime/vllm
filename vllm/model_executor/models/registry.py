@@ -606,6 +606,15 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
     "DFlashDraftModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
+    "DFlash2DraftModel": ("qwen3_dflash2", "DFlash2Qwen3ForCausalLM"),
+    # Muse Glimmer's DFlash draft head, reusing the generic qwen3_dflash
+    # implementation. EAGLEConfig rewrites a dflash draft's architecture to
+    # DFlash{arch} unless it already starts or ends with "DFlash" (see
+    # transformers_utils/configs/eagle.py), so the name the registry is asked
+    # for is DFlashMuseGlimmerAssistantModel -- same convention as
+    # DFlashLagunaForCausalLM. The bare name is kept as a defensive alias.
+    "MuseGlimmerAssistantModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
+    "DFlashMuseGlimmerAssistantModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
     "DSparkDraftModel": ("vllm.models.deepseek_v4", "DSparkDeepseekV4ForCausalLM"),
     "Qwen3DSparkModel": ("qwen3_dspark", "Qwen3DSparkForCausalLM"),
     "DFlashLagunaForCausalLM": ("laguna_dflash", "DFlashLagunaForCausalLM"),
