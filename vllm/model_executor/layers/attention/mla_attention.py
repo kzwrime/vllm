@@ -516,7 +516,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         self.prefill_backend: MLAPrefillBackend | None
         try:
-            prefill_backend_cls = get_mla_prefill_backend(vllm_config)
+            # prefill_backend_cls = get_mla_prefill_backend(vllm_config)
+            prefill_backend_cls = None
+            raise ValueError("prefill_backend not supported yet")
         except ValueError:
             if (
                 not self.impl.is_sparse
@@ -623,6 +625,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
             layer_slot_mapping = slot_mapping.get(self.layer_name)
+            assert self.use_pcp is False, "use_pcp must be False."
             kv_for_cache, kpe_for_cache, layer_slot_mapping = (
                 maybe_gather_mla_latent_cache_inputs(
                     kv_c_normed,
@@ -695,6 +698,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         quant_key = _detect_output_quant_key(
             output, output_scale, output_block_scale, self.num_heads * self.v_head_dim
         )
+        assert quant_key is None, "quant_key must be None."
         if quant_key is not None:
             # The fusion pass has allocated output with quantized dtype
             # (FP8 or uint8 for FP4). We can't write into it directly,
@@ -734,6 +738,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.impl.dcp_world_size = get_dcp_group().world_size
 
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
+        assert fp8_attention is False, "fp8_attention must be False."
 
         num_actual_toks = attn_metadata.num_actual_tokens
         if self.use_pcp and self.impl.dcp_world_size > 1 and quant_key is not None:
@@ -782,9 +787,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and self.impl.dcp_world_size <= 1
         )
 
+        assert num_mha_tokens == 0, "num_mha_tokens must be 0."
         if num_mha_tokens > 0:
             if mha_use_quant_output:
-                mha_output = quant_output
+                mha_output = quant_output  # type: ignore[has-type]
                 mha_output_scale = output_scale
             else:
                 mha_output = output
@@ -815,8 +821,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
             # Convert from (B, N, P) to (N, B, P)
-            mqa_q_nope = mqa_q_nope.transpose(0, 1)
+            # mqa_q_nope = mqa_q_nope.transpose(0, 1)
 
+            assert self.q_pad_num_heads is None, "q_pad_num_heads must be None."
             if self.q_pad_num_heads is not None:
                 B, N, L = mqa_q_pe.shape
                 mqa_pe_padded = mqa_q_pe.new_empty((B, self.q_pad_num_heads, L))
@@ -846,7 +853,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
             else:
                 # Pads the head_dim if necessary (for the underlying kernel)
-                N, B, P = mqa_q_nope.shape
+                # N, B, P = mqa_q_nope.shape
+                B, N, P = mqa_q_nope.shape
                 W_UK_T = self.W_UK_T_dcp_qrep if qrep_decode else self.W_UK_T
                 assert W_UK_T is not None
                 _, _, L = W_UK_T.shape
@@ -855,13 +863,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     mqa_ql_nope = mqa_q_nope.new_empty((self.q_pad_num_heads, B, L))
                     mqa_ql_nope.resize_((N, B, L))
                 else:
-                    mqa_ql_nope = mqa_q_nope.new_empty((N, B, L))
+                    mqa_ql_nope = mqa_q_nope.new_empty((B, N, L))
 
                 # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-                torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope)
+                # torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope)
 
+                # Multiply (B, N, P) x (N, P, L) -> (B, N, L)
+                import torch_xcpu
+
+                torch_xcpu.ops.einsum_mhk_hkn_to_mhn(mqa_q_nope, W_UK_T, mqa_ql_nope)
                 # Convert from (N, B, L) to (B, N, L)
-                mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
+                # mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
             if fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
@@ -1064,9 +1076,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
         else:
             # Convert from (L, N, V) to (N, L, V)
-            replace_parameter(self, "W_UV", W_UV.transpose(0, 1), prefer_copy=True)
+            replace_parameter(
+                self, "W_UV", W_UV.transpose(0, 1).contiguous(), prefer_copy=True
+            )
             # Convert from (L, N, P) to (N, P, L)
-            replace_parameter(self, "W_UK_T", W_UK.permute(1, 2, 0), prefer_copy=True)
+            replace_parameter(
+                self, "W_UK_T", W_UK.permute(1, 2, 0).contiguous(), prefer_copy=True
+            )
             if self.dcp_q_replicate:
                 self.W_UK_T_dcp_qrep = get_dcp_group().all_gather(
                     self.W_UK_T.contiguous(), dim=0
@@ -1125,7 +1141,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)
-        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+        # x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
         out = out.view(-1, self.num_heads, self.v_head_dim)
         if self.is_aiter_triton_fp4_bmm_enabled:
             out = rocm_aiter_ops.batched_gemm_a16wfp4(
@@ -1145,7 +1161,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         else:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
-            torch.bmm(x, self.W_UV, out=out.transpose(0, 1))
+            # torch.bmm(x, self.W_UV, out=out.transpose(0, 1))
+
+            # Multiply (B, N, L) x (N, L, V) -> (B, N, V)
+            import torch_xcpu
+
+            torch_xcpu.ops.einsum_mhk_hkn_to_mhn(x, self.W_UV, out)
 
 
 def unified_mla_kv_cache_update(
@@ -1514,7 +1535,7 @@ def backend_supports_prefill_query_quantization() -> bool:
         return False
 
     from vllm.config import get_current_vllm_config
-    from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
+    # from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 
     vllm_config = get_current_vllm_config()
     backend_cls = get_mla_prefill_backend(vllm_config)
