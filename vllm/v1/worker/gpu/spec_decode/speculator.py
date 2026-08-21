@@ -277,6 +277,18 @@ class DraftModelSpeculator(BaseSpeculator):
         if self.use_local_argmax_reduction:
             return self.model.get_top_tokens(hidden_states)
         logits = self.model.compute_logits(hidden_states)
+        if (
+            logits.device.type == "mcpu"
+            and logits.dtype == torch.bfloat16
+            and logits.dim() == 2
+            and logits.is_contiguous()
+        ):
+            from torch_xcpu import ops as xcpu_ops
+
+            output = torch.empty(
+                logits.size(0), dtype=torch.int64, device=logits.device
+            )
+            return xcpu_ops.argmax_out(logits, -1, False, output)
         return logits.argmax(dim=-1)
 
     def sample_draft(
