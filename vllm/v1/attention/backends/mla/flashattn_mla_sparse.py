@@ -40,6 +40,9 @@ class FlashAttnMLASparseBackend(AttentionBackend):
         "auto",
         "float16",
         "bfloat16",
+        "fp8",
+        "fp8_e4m3",
+        "fp8_ds_mla",
     ]
 
     @staticmethod
@@ -87,10 +90,21 @@ class FlashAttnMLASparseBackend(AttentionBackend):
         use_mm_prefix: bool,
         device_capability: DeviceCapability,
     ) -> str | None:
-        if kv_cache_dtype not in (None, "auto", "float16", "bfloat16"):
-            return (
-                "FlashAttention MLA Sparse currently supports only FP16/BF16 KV cache"
-            )
+        if (
+            kv_cache_dtype in ("fp8", "fp8_e4m3", "fp8_ds_mla")
+            and dtype != torch.bfloat16
+        ):
+            return "fp8_ds_mla KV cache requires BF16 query dtype"
+        if kv_cache_dtype not in (
+            None,
+            "auto",
+            "float16",
+            "bfloat16",
+            "fp8",
+            "fp8_e4m3",
+            "fp8_ds_mla",
+        ):
+            return "FlashAttention MLA Sparse does not support this KV cache dtype"
 
         if not flash_attn_supports_mla():
             return "FlashAttention MLA not supported on this device"
@@ -115,7 +129,8 @@ class FlashAttnMLASparseBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        return (num_blocks, block_size, head_size)
+        entry_size = 656 if cache_dtype_str == "fp8_ds_mla" else head_size
+        return (num_blocks, block_size, entry_size)
 
 
 @dataclass
@@ -186,9 +201,9 @@ class FlashAttnMLASparseImpl(SparseMLACommonImpl[FlashAttnMLASparseMetadata]):
                 "FlashAttnMLASparseImpl does not support alibi, sliding window, "
                 "or logits soft cap."
             )
-        if kv_cache_dtype not in ("auto", "float16", "bfloat16"):
+        if kv_cache_dtype not in ("auto", "float16", "bfloat16", "fp8_ds_mla"):
             raise NotImplementedError(
-                "FlashAttnMLASparseImpl currently supports only FP16/BF16 KV cache."
+                "FlashAttnMLASparseImpl only supports FP16/BF16 or fp8_ds_mla KV cache."
             )
 
         super().__init__(
