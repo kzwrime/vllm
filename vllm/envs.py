@@ -2171,6 +2171,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_XCPU_ENABLE_DUMMY_RUN_FAST_PATH",
         "VLLM_MODEL_REDIRECT_PATH",
         "VLLM_HOST_IP",
+        "VLLM_LOOPBACK_IP",
         "VLLM_FORCE_AOT_LOAD",
         "S3_ACCESS_KEY_ID",
         "S3_SECRET_ACCESS_KEY",

@@ -36,6 +36,13 @@ def test_nixl_side_channel_host_is_not_compile_factor(
     assert "VLLM_NIXL_SIDE_CHANNEL_HOST" not in envs.compile_factors()
 
 
+def test_loopback_ip_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
+    """Node-local network identity must not invalidate compile artifacts."""
+    monkeypatch.setenv("VLLM_LOOPBACK_IP", "10.0.0.15")
+
+    assert "VLLM_LOOPBACK_IP" not in envs.compile_factors()
+
+
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
     monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)
