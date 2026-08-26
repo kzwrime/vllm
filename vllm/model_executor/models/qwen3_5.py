@@ -218,6 +218,14 @@ class Qwen3_5Model(Qwen3NextModel):
             ".in_proj_a": (".in_proj_ba", 1),
         }
     )
+    fused_gdn_hf_to_vllm_mapper = Qwen3NextModel.hf_to_vllm_mapper | WeightsMapper(
+        orig_to_new_stacked={
+            ".in_proj_qkv": (".in_proj_qkvzba", (0, 1, 2)),
+            ".in_proj_z": (".in_proj_qkvzba", 3),
+            ".in_proj_b": (".in_proj_qkvzba", 4),
+            ".in_proj_a": (".in_proj_qkvzba", 5),
+        }
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(Qwen3NextModel, self).__init__()
@@ -250,6 +258,11 @@ class Qwen3_5Model(Qwen3NextModel):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers, get_layer, prefix=f"{prefix}.layers"
         )
+        if any(
+            name.endswith(".in_proj_qkvzba.weight")
+            for name, _ in self.named_parameters()
+        ):
+            self.hf_to_vllm_mapper = self.fused_gdn_hf_to_vllm_mapper
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
@@ -295,6 +308,12 @@ class Qwen3_5ForCausalLMBase(
         # GDN fused projections.
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
+        "in_proj_qkvzba": [
+            "in_proj_qkv",
+            "in_proj_z",
+            "in_proj_b",
+            "in_proj_a",
+        ],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -403,6 +422,12 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
         "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
         "in_proj_ba": ["in_proj_b", "in_proj_a"],
+        "in_proj_qkvzba": [
+            "in_proj_qkv",
+            "in_proj_z",
+            "in_proj_b",
+            "in_proj_a",
+        ],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
