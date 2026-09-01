@@ -292,6 +292,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             num_tokens_across_dp=num_tokens_across_dp,
             slot_mapping=slot_mappings,
             batch_descriptor=batch_descriptor,
+            skip_compiled=attn_metadata is None,
         ):
             inputs_embeds = None
             if self.supports_mm_inputs:

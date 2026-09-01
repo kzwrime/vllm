@@ -254,6 +254,9 @@ class DFlashProposer(SpecDecodeBaseProposer):
             num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
             slot_mapping=slot_mapping_dict,
+            # Profiling has no attention metadata. Defer the one-shot compile
+            # until the first real draft forward supplies valid metadata.
+            skip_compiled=True,
         ):
             self.model(
                 input_ids=self.input_ids[:num_input_tokens],

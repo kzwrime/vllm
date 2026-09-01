@@ -1659,6 +1659,7 @@ class SpecDecodeBaseProposer:
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 slot_mapping=slot_mapping_dict,
+                skip_compiled=True,
             ):
                 if self.supports_mm_inputs:
                     input_ids = None

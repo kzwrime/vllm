@@ -231,6 +231,9 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_tokens_across_dp=num_tokens_across_dp,
             slot_mapping=slot_mappings,
             batch_descriptor=batch_descriptor,
+            # Dummy/profile forwards omit attention metadata. Keep them eager
+            # and defer the one-shot compile until a real draft forward.
+            skip_compiled=attn_metadata is None,
         ):
             last_hidden_states = self.model(
                 input_ids=self.input_buffers.input_ids[:num_tokens],
