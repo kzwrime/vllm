@@ -281,6 +281,20 @@ def _try_download_from_hf_hub(
             exc_info=e,
         )
         return None
+    except Exception as e:
+        # ModelScope patches Hugging Face Hub download APIs when enabled, but
+        # reports a missing repository file with its own NotExistError. Treat
+        # it like HF Hub's EntryNotFoundError so optional repository files can
+        # remain optional. Do not swallow any other ModelScope error.
+        if envs.VLLM_USE_MODELSCOPE:
+            from modelscope.hub.errors import NotExistError
+
+            if isinstance(e, NotExistError):
+                logger.debug(
+                    "File or repository not found in ModelScope download: %s", e
+                )
+                return None
+        raise
 
 
 def get_hf_file_bytes(

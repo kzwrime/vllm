@@ -10,6 +10,7 @@ import pytest
 from huggingface_hub import _CACHED_NO_EXIST
 
 from vllm.transformers_utils.repo_utils import (
+    _try_download_from_hf_hub,
     any_pattern_in_repo_files,
     get_hf_file_to_dict,
     is_mistral_model_repo,
@@ -142,6 +143,34 @@ def test_get_hf_file_to_dict_honors_no_exist_marker(
         result = get_hf_file_to_dict("processor_config.json", "some/repo")
     assert result is None
     assert mock_download.call_count == int(should_download)
+
+
+def test_modelscope_missing_file_returns_none():
+    errors = pytest.importorskip("modelscope.hub.errors")
+    not_exist_error = errors.NotExistError("missing optional file")
+    mock_api = MagicMock()
+    mock_api.hf_hub_download.side_effect = not_exist_error
+
+    with (
+        patch("vllm.transformers_utils.repo_utils.envs.VLLM_USE_MODELSCOPE", True),
+        patch("vllm.transformers_utils.repo_utils.hf_api", return_value=mock_api),
+    ):
+        assert (
+            _try_download_from_hf_hub("some/repo", "optional_file.pt", revision="main")
+            is None
+        )
+
+
+def test_modelscope_download_does_not_swallow_other_errors():
+    mock_api = MagicMock()
+    mock_api.hf_hub_download.side_effect = RuntimeError("download failed")
+
+    with (
+        patch("vllm.transformers_utils.repo_utils.envs.VLLM_USE_MODELSCOPE", True),
+        patch("vllm.transformers_utils.repo_utils.hf_api", return_value=mock_api),
+        pytest.raises(RuntimeError, match="download failed"),
+    ):
+        _try_download_from_hf_hub("some/repo", "optional_file.pt", revision="main")
 
 
 @pytest.mark.parametrize(
