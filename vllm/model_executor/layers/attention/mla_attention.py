@@ -519,9 +519,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         self.prefill_backend: MLAPrefillBackend | None
         try:
-            # prefill_backend_cls = get_mla_prefill_backend(vllm_config)
-            prefill_backend_cls = None
-            raise ValueError("prefill_backend not supported yet")
+            prefill_backend_cls = get_mla_prefill_backend(vllm_config)
         except ValueError:
             if (
                 not self.impl.is_sparse
@@ -789,7 +787,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and self.impl.dcp_world_size <= 1
         )
 
-        assert num_mha_tokens == 0, "num_mha_tokens must be 0."
         if num_mha_tokens > 0:
             if mha_use_quant_output:
                 mha_output = quant_output  # type: ignore[has-type]
