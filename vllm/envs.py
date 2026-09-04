@@ -172,6 +172,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_XCPU_ENABLE_DUMMY_RUN_FAST_PATH: bool = True
+    VLLM_XCPU_COMPILE_ROLE: Literal["decode", "prefill"] = "decode"
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
     VLLM_RAY_DP_PLACEMENT_NODE_IPS: str = ""
     VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY: str = ""
@@ -1412,6 +1413,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_XCPU_ENABLE_DUMMY_RUN_FAST_PATH": lambda: bool(
         int(os.getenv("VLLM_XCPU_ENABLE_DUMMY_RUN_FAST_PATH", "1"))
     ),
+    # Batch structure used to specialize the AOT-compiled model on
+    # direct-call (non-opaque-attention) platforms: "decode" compiles the
+    # model with a pure-decode dummy batch, "prefill" with a pure-prefill
+    # one. Batches whose structure does not match run eager.
+    "VLLM_XCPU_COMPILE_ROLE": lambda: os.getenv("VLLM_XCPU_COMPILE_ROLE", "decode"),
     # Strategy to pack the data parallel ranks for Ray.
     # Available options:
     # - "fill":

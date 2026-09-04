@@ -741,6 +741,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
 
         num_actual_toks = attn_metadata.num_actual_tokens
+        num_decode_toks = attn_metadata.num_decode_tokens
+        if (
+            self.use_direct_call
+            and num_decode_toks is not None
+            and (num_decode_toks == 0 or num_decode_toks == num_actual_toks)
+        ):
+            # Pure decode/prefill batch without padded rows: the metadata
+            # bound equals the row count. Derive it from the tensor shape so
+            # the compiled graph stays batch-size dynamic (the metadata int is
+            # frozen at trace time).
+            num_actual_toks = q.shape[0]
         if self.use_pcp and self.impl.dcp_world_size > 1 and quant_key is not None:
             raise NotImplementedError(
                 "MRV2 MLA PCP+DCP does not support fused output quantization yet."
@@ -765,12 +776,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         num_mqa_tokens = attn_metadata.num_decode_tokens
         num_mha_tokens = q.size(0) - num_mqa_tokens
+        if num_mha_tokens <= 0:
+            # Pure decode batch without padded rows.
+            # Derive it from the tensor shape so
+            # the compiled graph stays batch-size dynamic
+            num_mqa_tokens = q.size(0)
 
         if self.impl.is_sparse and num_mha_tokens > 0:
-            prefill_max_seq_len = attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
+            # Dense MHA prefill is used whenever a prefill backend exists,
+            # independent of the per-step context length: reading
+            # prefill_max_seq_len here would freeze a per-step varying int
+            # into the compiled graph. Long contexts are handled by the
+            # prefill backend's kernels.
             use_mha = (
                 self.prefill_backend is not None
-                and prefill_max_seq_len <= attn_metadata.topk_tokens  # type: ignore[attr-defined]
                 and not self._vllm_config.attention_config.sparse_mla_force_mqa
             )
             if not use_mha:
