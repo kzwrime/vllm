@@ -1228,6 +1228,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # cross-attention cache with dynamic encoder outputs.
             skip_compiled = True
 
+        if not current_platform.opaque_attention_op():
+            # Direct-call attention reads attention metadata inline in the
+            # traced region, so the AOT artifact is specialized on one batch
+            # structure (see compile_or_warm_up_model). Batches whose
+            # decode/prefill structure does not match run eager.
+            min_query_len = min(scheduler_output.num_scheduled_tokens.values())
+            if envs.VLLM_XCPU_COMPILE_ROLE == "prefill":
+                role_matches = min_query_len > 1
+            else:
+                role_matches = max_query_len == 1
+            if not role_matches:
+                skip_compiled = True
+
         if skip_attn_for_dummy_run:
             skip_compiled = True
         batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(

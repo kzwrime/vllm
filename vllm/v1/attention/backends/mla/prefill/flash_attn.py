@@ -15,11 +15,15 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.fa_utils import (
-    compile_flash_attn_varlen_func_from_specs,
-    get_flash_attn_version,
-    is_flash_attn_varlen_func_available,
-)
+
+if current_platform.device_name != "mcpu":
+    from vllm.v1.attention.backends.fa_utils import (
+        compile_flash_attn_varlen_func_from_specs,
+        get_flash_attn_version,
+        is_flash_attn_varlen_func_available,
+    )
+else:
+    from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.mla.prefill.base import (
     MLADimensions,
     MLAPrefillBackend,
@@ -30,7 +34,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.attention.mla_attention import MLADims
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
-if is_flash_attn_varlen_func_available():
+if current_platform.device_name != "mcpu" and is_flash_attn_varlen_func_available():
     from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 else:
     flash_attn_varlen_func = None  # type: ignore[assignment]
@@ -331,10 +335,11 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
 
         # Handle the differences between the flash_attn_varlen from
         # flash_attn and the one from vllm_flash_attn
-        assert flash_attn_varlen_func is not None, (
-            "FlashAttnPrefillBackend requires flash_attn_varlen_func. "
-            "Ensure FlashAttnPrefillBackend.is_available() is checked first."
-        )
+        if current_platform.device_name != "mcpu":
+            assert flash_attn_varlen_func is not None, (
+                "FlashAttnPrefillBackend requires flash_attn_varlen_func. "
+                "Ensure FlashAttnPrefillBackend.is_available() is checked first."
+            )
         qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.flash_attn_varlen_func = flash_attn_varlen_func
         self.vllm_flash_attn_version = get_flash_attn_version(

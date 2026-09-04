@@ -692,6 +692,36 @@ class Worker(WorkerBase):
             self.model_runner._dummy_run(size, skip_eplb=True, remove_lora=False)
         self.model_runner.maybe_remove_all_loras(self.model_runner.lora_config)
 
+        if (
+            self.vllm_config.compilation_config.mode not in (None, CompilationMode.NONE)
+            and not current_platform.opaque_attention_op()
+        ):
+            # Direct-call attention platforms read attention metadata inline in
+            # the traced region, so the AOT artifact must be specialized on one
+            # batch structure. Trigger the first (compiling) model call with a
+            # dummy batch matching this node's role; structurally different
+            # batches run eager (see skip_compiled in the model runner).
+            role = envs.VLLM_XCPU_COMPILE_ROLE
+            if role == "prefill":
+                num_tokens = max(
+                    self.scheduler_config.max_num_batched_tokens,
+                    2 * self.model_runner.max_num_reqs,
+                )
+            else:
+                num_tokens = self.model_runner.decode_query_len * max(  # type: ignore[attr-defined]
+                    1, min(8, self.model_runner.max_num_reqs)
+                )
+            logger.info(
+                "Compiling model with a %s-specialized dummy batch of %d tokens",
+                role,
+                num_tokens,
+            )
+            self.model_runner._dummy_run(
+                num_tokens,
+                uniform_decode=role != "prefill",
+                skip_eplb=True,
+            )
+
         # Warmup and tune the kernels used during model execution before
         # cuda graph capture.
         kernel_warmup(self)
