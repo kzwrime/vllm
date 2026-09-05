@@ -8,6 +8,7 @@ from itertools import islice
 import torch
 from torch import nn
 
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
@@ -81,11 +82,12 @@ logger = init_logger(__name__)
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
-def _should_use_sequence_parallel(vllm_config: VllmConfig) -> bool:
+def _should_use_attn_reduce_scatter_for_moe(vllm_config: VllmConfig) -> bool:
     config = vllm_config.model_config.hf_text_config
     parallel_config = vllm_config.parallel_config
     return (
-        parallel_config.use_sequence_parallel_moe
+        not envs.VLLM_DISABLE_ATTN_REDUCE_SCATTER_FOR_MOE
+        and parallel_config.use_sequence_parallel_moe
         and parallel_config.pipeline_parallel_size == 1
         and getattr(config, "num_experts", 0) > 0
         and not getattr(config, "mlp_only_layers", [])
@@ -443,7 +445,7 @@ class Qwen3NextDecoderLayer(nn.Module):
             config.num_experts > 0
             and (self.layer_idx + 1) % config.decoder_sparse_step == 0
         )
-        self.use_attn_reduce_scatter_for_moe = _should_use_sequence_parallel(
+        self.use_attn_reduce_scatter_for_moe = _should_use_attn_reduce_scatter_for_moe(
             vllm_config
         )
 

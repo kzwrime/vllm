@@ -77,6 +77,7 @@ from .qwen3_next import (
     Qwen3NextSparseMoeBlock,
     QwenNextMixtureOfExperts,
     _is_shared_expert_fse_compatible,
+    _should_use_attn_reduce_scatter_for_moe,
 )
 from .qwen3_vl import (
     Qwen3_VisionTransformer,
@@ -122,16 +123,13 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         config = vllm_config.model_config.hf_text_config
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
-        parallel_config = vllm_config.parallel_config
         quant_config = vllm_config.quant_config
 
         self.layer_type = layer_type
         self.layer_idx = extract_layer_index(prefix)
         is_moe_layer = config.model_type == "qwen3_5_moe_text"
         self.use_attn_reduce_scatter_for_moe = (
-            parallel_config.use_sequence_parallel_moe
-            and parallel_config.pipeline_parallel_size == 1
-            and is_moe_layer
+            is_moe_layer and _should_use_attn_reduce_scatter_for_moe(vllm_config)
         )
 
         if self.layer_type == "linear_attention":
