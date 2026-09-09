@@ -256,6 +256,17 @@ def _try_download_from_hf_hub(
     """
     if Path(model).is_dir():
         return None
+    not_found_errors: tuple[type[Exception], ...] = (
+        RepositoryNotFoundError,
+        RevisionNotFoundError,
+        EntryNotFoundError,
+        LocalEntryNotFoundError,
+    )
+    if envs.VLLM_USE_MODELSCOPE:
+        from modelscope.hub.errors import NotExistError
+
+        # ModelScope patches hf_hub_download but uses its own missing-file error.
+        not_found_errors += (NotExistError,)
     try:
         return Path(
             hf_api().hf_hub_download(
@@ -266,12 +277,7 @@ def _try_download_from_hf_hub(
         )
     except huggingface_hub.errors.OfflineModeIsEnabled:
         return None
-    except (
-        RepositoryNotFoundError,
-        RevisionNotFoundError,
-        EntryNotFoundError,
-        LocalEntryNotFoundError,
-    ) as e:
+    except not_found_errors as e:
         logger.debug("File or repository not found in hf_hub_download: %s", e)
         return None
     except HfHubHTTPError as e:
