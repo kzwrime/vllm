@@ -537,7 +537,7 @@ def sparse_attn_indexer(
                 )
             else:
                 padded_q_quant_decode_tokens = pack_seq_triton(
-                    q_quant[:num_decode_tokens], decode_lens
+                    q_quant[:num_decode_tokens], decode_lens, pad_value=0
                 )
                 padded_q_scale = None
         else:
@@ -554,6 +554,12 @@ def sparse_attn_indexer(
         batch_size = padded_q_quant_decode_tokens.shape[0]
         next_n = padded_q_quant_decode_tokens.shape[1]
         num_padded_tokens = batch_size * next_n
+        if decode_metadata.requires_padding:
+            padded_weights = pack_seq_triton(
+                weights[:num_decode_tokens], decode_lens, pad_value=0
+            ).reshape(num_padded_tokens, -1)
+        else:
+            padded_weights = weights[:num_padded_tokens]
         seq_lens = decode_metadata.seq_lens[:batch_size]
         # seq_lens is always 2D: (B, next_n) for native spec decode, (B, 1)
         # otherwise. deep_gemm fp8_fp4_paged_mqa_logits requires 2D context_lens;
@@ -572,7 +578,7 @@ def sparse_attn_indexer(
             logits = torch.ops.vllm.xpu_fp8_paged_mqa_logits(
                 padded_q_quant_cast,
                 kv_cache,
-                weights[:num_padded_tokens],
+                padded_weights,
                 seq_lens_xpu,
                 decode_metadata.block_table,
                 decode_metadata.schedule_metadata,
@@ -582,7 +588,7 @@ def sparse_attn_indexer(
             logits = fp8_fp4_paged_mqa_logits(
                 (padded_q_quant_cast, padded_q_scale),
                 kv_cache,
-                weights[:num_padded_tokens],
+                padded_weights,
                 seq_lens,
                 decode_metadata.block_table,
                 decode_metadata.schedule_metadata,
@@ -590,7 +596,15 @@ def sparse_attn_indexer(
                 clean_logits=False,
             )
         num_rows = logits.shape[0]
-        topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+        topk_indices = (
+            torch.empty(
+                (num_padded_tokens, topk_tokens),
+                dtype=topk_indices_buffer.dtype,
+                device=topk_indices_buffer.device,
+            )
+            if decode_metadata.requires_padding
+            else topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+        )
 
         use_cooperative_topk = (
             current_platform.is_cuda()
@@ -760,7 +774,11 @@ class SparseAttnIndexer(CustomOp):
         k: torch.Tensor,
         weights: torch.Tensor,
     ):
-        if current_platform.is_cuda() or current_platform.is_xpu():
+        if (
+            current_platform.is_cuda()
+            or current_platform.is_xpu()
+            or current_platform.supports_sparse_attn_indexer_accelerated_path()
+        ):
             return self.forward_cuda(hidden_states, q_quant, k, weights)
         elif current_platform.is_rocm():
             return self.forward_hip(hidden_states, q_quant, k, weights)
@@ -777,6 +795,30 @@ class SparseAttnIndexer(CustomOp):
         k: torch.Tensor,
         weights: torch.Tensor,
     ):
+        if (
+            current_platform.supports_sparse_attn_indexer_accelerated_path()
+            and not current_platform.is_cuda()
+        ):
+            if self.use_fp4_cache or isinstance(q_quant, tuple):
+                raise NotImplementedError(
+                    "The accelerated OOT sparse indexer supports FP8 Q/cache only"
+                )
+            if self.use_pcp or self.dcp_world_size != 1:
+                raise NotImplementedError(
+                    "The accelerated OOT sparse indexer requires PCP=1 and DCP=1"
+                )
+            if (
+                q_quant.ndim != 3
+                or q_quant.shape[1] not in (32, 64)
+                or q_quant.shape[2] != 128
+                or self.topk_tokens not in (512, 1024, 2048)
+                or self.quant_block_size != 128
+            ):
+                raise NotImplementedError(
+                    "The accelerated OOT sparse indexer supports H={32,64}, "
+                    "D=128, K={512,1024,2048}, quant_block_size=128"
+                )
+
         # FP8 path: single tensor (per-token scale is folded into `weights`).
         # FP4 path: (values, scales) tuple with scales required by the kernel.
         if isinstance(q_quant, tuple):

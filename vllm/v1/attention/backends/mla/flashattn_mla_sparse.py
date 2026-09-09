@@ -13,6 +13,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
     SparseMLACommonMetadataBuilder,
 )
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -47,7 +48,7 @@ class FlashAttnMLASparseBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [64]
+        return list(current_platform.get_sparse_mla_kernel_block_sizes())
 
     @staticmethod
     def get_name() -> str:

@@ -211,6 +211,48 @@ class Platform:
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
 
+    @classmethod
+    def supports_sparse_attn_indexer_accelerated_path(cls) -> bool:
+        """Whether an OOT platform implements vLLM's CUDA indexer op chain.
+
+        Platforms returning ``True`` provide the exact cache, DeepGEMM-named
+        logits and ``_C`` TopK operators consumed by :class:`SparseAttnIndexer`.
+        The metadata shape/build hooks supply the platform's schedule format.
+        The default is deliberately conservative:
+        merely being an accelerator does not imply ABI or algorithm parity.
+        """
+        return False
+
+    @classmethod
+    def supports_sparse_attn_indexer_native_multi_token(cls) -> bool:
+        """Whether paged indexer logits keep multi-token requests together."""
+        return cls.is_device_capability_family(100)
+
+    @classmethod
+    def get_sparse_attn_indexer_metadata_shape(
+        cls, max_num_requests: int, max_model_len: int, num_sms: int
+    ) -> tuple[int, ...]:
+        """Shape of the reusable platform-specific decode schedule buffer."""
+        return (num_sms + 1, 2)
+
+    @classmethod
+    def build_sparse_attn_indexer_metadata(
+        cls,
+        context_lens: torch.Tensor,
+        block_size: int,
+        num_sms: int,
+        output: torch.Tensor,
+    ) -> None:
+        """Populate the schedule consumed by this platform's paged logits."""
+        from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata
+
+        output.copy_(get_paged_mqa_logits_metadata(context_lens, block_size, num_sms))
+
+    @classmethod
+    def get_sparse_mla_kernel_block_sizes(cls) -> list[int]:
+        """Page sizes supported by the sparse MLA and FP8 indexer kernels."""
+        return [64]
+
     def is_unspecified(self) -> bool:
         return self._enum == PlatformEnum.UNSPECIFIED
 

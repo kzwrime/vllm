@@ -335,6 +335,9 @@ class SpeculativeConfig:
             "deepseek_v32",
             "glm_moe_dsa",
         ):
+            if hf_config.model_type == "glm_moe_dsa":
+                # Preserve GLM's implicit FP32 routing after the model-type rename.
+                hf_config.moe_router_dtype = "float32"
             hf_config.model_type = "deepseek_mtp"
         if hf_config.model_type == "deepseek_mtp":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)

@@ -19,7 +19,6 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
-    get_paged_mqa_logits_metadata,
     has_deep_gemm,
 )
 from vllm.utils.math_utils import cdiv
@@ -136,7 +135,9 @@ class DeepseekV32IndexerBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        return [1, 64] if current_platform.is_rocm() else [64]
+        if current_platform.is_rocm():
+            return [1, 64]
+        return list(current_platform.get_sparse_mla_kernel_block_sizes())
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -413,7 +414,7 @@ class DeepSeekV32IndexerDecodeMetadata:
     block_table: torch.Tensor
     # seq_lens: per-token effective context lengths.
     #   - flatten path / plain decode: 1D (batch_size,)
-    #   - native MTP path: 2D (B, next_n) where [b,j] = L_b - next_n + j + 1
+    #   - native MTP path: 2D (B, next_n), right-padded at each request's L_b
     # Both fp8_fp4_paged_mqa_logits and the topk kernels accept both shapes.
     seq_lens: torch.Tensor
     decode_lens: torch.Tensor
@@ -508,14 +509,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         next_n = self.num_speculative_tokens + 1
         self.decode_threshold = next_n
         self.reorder_batch_threshold = None
-        # NOTE: SM100 datacenter GPUs support any next_n natively via the
-        # multi-atom paged MQA logits kernels (FP8 and FP4 indexer
-        # caches). Outside the SM100 family the FP8
-        # paged MQA logits kernel only supports next_n in (1, 2)
-        # (deepgemm smxx_fp8_fp4_paged_mqa_logits.hpp:233), so flatten there.
-        self.use_flattening = not current_platform.is_device_capability_family(
-            100
-        ) and next_n not in (1, 2)
+        # SM100 and opt-in platforms keep all Q tokens of a request together.
+        # Other DeepGEMM kernels require flattening beyond next_n=2.
+        self.use_flattening = (
+            not current_platform.supports_sparse_attn_indexer_native_multi_token()
+            and next_n not in (1, 2)
+        )
         logger.info_once(
             "DSA indexer decode path: use_flattening=%s "
             "(next_n=%d, use_fp4_indexer_cache=%s)",
@@ -539,7 +538,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         # (B, max_decode_len) at runtime, keeping context_lens contiguous even
         # when max_decode_len is smaller than next_n.
         self.decode_seq_lens_buffer = torch.zeros(
-            (scheduler_config.max_num_batched_tokens,),
+            (
+                max(
+                    scheduler_config.max_num_batched_tokens,
+                    scheduler_config.max_num_seqs * next_n,
+                ),
+            ),
             dtype=torch.int32,
             device=self.device,
         )
@@ -569,9 +573,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             device=self.device,
         )
 
-        # See: DeepGMM/csrc/apis/attention.hpp
         self.scheduler_metadata_buffer = torch.empty(
-            (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
+            current_platform.get_sparse_attn_indexer_metadata_shape(
+                scheduler_config.max_num_seqs,
+                self.vllm_config.model_config.max_model_len,
+                self.num_sms,
+            ),
+            dtype=torch.int32,
+            device=self.device,
         )
 
         # KV compression. Default to 1 for no compression.
@@ -727,16 +736,17 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             requires_padding = min_decode_len != max_decode_len
             if use_native and next_n > 1:
                 assert self.decode_seq_lens_buffer.dim() == 1
-                # (B, max_decode_len): token j attends to
-                # L - max_decode_len + j + 1 KV tokens.
+                # Q is right-padded. Real token j attends to L-decode_len+j+1;
+                # pad bounds saturate at L so the final column covers all Q.
                 seq_lens_buffer = self.decode_seq_lens_buffer[
                     : num_decodes * max_decode_len
                 ].view(num_decodes, max_decode_len)
-                seq_lens_buffer[:] = (
+                seq_lens_buffer[:] = torch.minimum(
                     seq_lens.unsqueeze(1)
-                    - max_decode_len
+                    - decode_lens.unsqueeze(1)
                     + 1
-                    + self.offsets_buffer[:max_decode_len]
+                    + self.offsets_buffer[:max_decode_len],
+                    seq_lens.unsqueeze(1),
                 )
                 seq_lens = seq_lens_buffer
             return seq_lens, block_table, decode_lens, num_decodes, requires_padding
@@ -954,12 +964,16 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if seq_lens.dim() == 1:
                 seq_lens = seq_lens.unsqueeze(-1)
 
-            # DeepGEMM is required for the paged MQA logits on CUDA devices
-            if current_platform.is_cuda() and has_deep_gemm():
-                self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
+            # Generate the platform's schedule once per scheduling step in a
+            # stable buffer shared by all indexer layers.
+            if (
+                current_platform.is_cuda() and has_deep_gemm()
+            ) or current_platform.supports_sparse_attn_indexer_accelerated_path():
+                current_platform.build_sparse_attn_indexer_metadata(
                     seq_lens,
                     self.kv_cache_spec.storage_block_size,
                     self.num_sms,
+                    self.scheduler_metadata_buffer,
                 )
 
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
