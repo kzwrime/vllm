@@ -151,6 +151,7 @@ class RejectionSampler:
             input_batch.cu_num_logits,
             input_batch.idx_mapping,
             self.sampler.req_states.prefill_len.gpu,
+            out=self.sampler._num_rejected_buffer[: input_batch.idx_mapping.shape[0]],
         )
 
         return SamplerOutput(
