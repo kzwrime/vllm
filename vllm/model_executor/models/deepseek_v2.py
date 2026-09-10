@@ -127,7 +127,13 @@ def _get_moe_router_dtype(
     if getattr(config, "model_type", None) == "glm_moe_dsa":
         # Older GLM-5/5.2 configs require fp32 routing but do not expose
         # moe_router_dtype yet.
-        return torch.float32
+        # return torch.float32
+
+        # XCPU note: glm_moe_dsa (GLM-5/5.2): routing scores are computed in fp32 inside
+        # torch_xcpu::grouped_topk regardless of logits dtype (bf16->fp32 is
+        # lossless), so router logits stay in bf16. An fp32 out_dtype here forces
+        # a prims::convert_element_type fallback in the compiled graph.
+        return None
     if router_dtype == "float32":
         return torch.float32
     return None
