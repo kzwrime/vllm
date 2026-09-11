@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -292,29 +291,6 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_reqs, self.num_speculative_steps
         )
 
-    def _build_draft_attn_metadata(
-        self,
-        num_reqs: int,
-        num_reqs_padded: int,
-        num_tokens_padded: int,
-        seq_lens_cpu_upper_bound: torch.Tensor,
-        step: int,
-        num_query_per_req: int | None = None,
-        causal: bool | Mapping[int, bool] = False,
-    ) -> dict[str, Any] | None:
-        if not self.draft_attn_layer_names:
-            return None
-        assert num_query_per_req is None  # Omitted for DFlash, read from self instead
-        return super()._build_draft_attn_metadata(
-            num_reqs,
-            num_reqs_padded,
-            num_tokens_padded,
-            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-            step=step,
-            num_query_per_req=self.num_query_per_req,
-            causal=causal,
-        )
-
     def _combine_target_hidden_states(
         self,
         last_hidden_states: torch.Tensor,
@@ -461,15 +437,14 @@ class DFlashSpeculator(DraftModelSpeculator):
             need_eager=is_profile,
         )
 
-        num_reqs_padded = batch_desc.num_reqs or num_reqs
         num_tokens_padded = batch_desc.num_tokens
 
         # Rebuild the draft attention metadata even when replaying the FULL
         # graph so that any attention metadata builder state is updated.
-        draft_attn_metadata = self._build_draft_attn_metadata(
+        draft_attn_metadata = self._build_uniform_attn_metadata(
             num_reqs=num_reqs,
-            num_reqs_padded=num_reqs_padded,
-            num_tokens_padded=num_tokens_padded,
+            batch_desc=batch_desc,
+            num_query_per_req=self.num_query_per_req,
             seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
             step=self.num_query_per_req,
             causal=self._group_causal,
