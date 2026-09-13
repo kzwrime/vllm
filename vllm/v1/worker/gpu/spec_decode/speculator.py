@@ -256,6 +256,10 @@ class DraftModelSpeculator(BaseSpeculator):
             kv_cache_config=self.kv_cache_config,
             causal=causal,
             seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
+            # Draft prefill reuses target metadata; this path only generates
+            # draft tokens. Supply the exact phase on host, even when sequence
+            # lengths are only known precisely on device after rejection.
+            is_prefilling=torch.zeros(num_reqs_padded, dtype=torch.bool, device="cpu"),
         )
         return attn_metadata
 
