@@ -519,9 +519,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         self.prefill_backend: MLAPrefillBackend | None
         try:
-            # prefill_backend_cls = get_mla_prefill_backend(vllm_config)
-            prefill_backend_cls = None
-            raise ValueError("prefill_backend not supported yet")
+            prefill_backend_cls = get_mla_prefill_backend(vllm_config)
         except ValueError:
             if (
                 not self.impl.is_sparse
@@ -743,6 +741,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
 
         num_actual_toks = attn_metadata.num_actual_tokens
+        num_decode_toks = attn_metadata.num_decode_tokens
+        if (
+            self.use_direct_call
+            and num_decode_toks is not None
+            and (num_decode_toks == 0 or num_decode_toks == num_actual_toks)
+        ):
+            # Pure decode/prefill batch without padded rows: the metadata
+            # bound equals the row count. Derive it from the tensor shape so
+            # the compiled graph stays batch-size dynamic (the metadata int is
+            # frozen at trace time).
+            num_actual_toks = q.shape[0]
         if self.use_pcp and self.impl.dcp_world_size > 1 and quant_key is not None:
             raise NotImplementedError(
                 "MRV2 MLA PCP+DCP does not support fused output quantization yet."
@@ -767,13 +776,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         num_mqa_tokens = attn_metadata.num_decode_tokens
         num_mha_tokens = q.size(0) - num_mqa_tokens
+        if num_mha_tokens <= 0:
+            # Pure decode batch without padded rows.
+            # Derive it from the tensor shape so
+            # the compiled graph stays batch-size dynamic
+            num_mqa_tokens = q.size(0)
 
         if self.impl.is_sparse and num_mha_tokens > 0:
             prefill_max_seq_len = attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
             use_mha = (
                 self.prefill_backend is not None
+                # TODO: This condition should be lowered into operators
+                # when prefill needs to run with torch compile
                 and prefill_max_seq_len <= attn_metadata.topk_tokens  # type: ignore[attr-defined]
                 and not self._vllm_config.attention_config.sparse_mla_force_mqa
+                and attn_metadata.prefill.chunked_context is None  # type: ignore[union-attr]
             )
             if not use_mha:
                 num_mqa_tokens = q.size(0)
@@ -789,7 +806,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and self.impl.dcp_world_size <= 1
         )
 
-        assert num_mha_tokens == 0, "num_mha_tokens must be 0."
         if num_mha_tokens > 0:
             if mha_use_quant_output:
                 mha_output = quant_output  # type: ignore[has-type]
