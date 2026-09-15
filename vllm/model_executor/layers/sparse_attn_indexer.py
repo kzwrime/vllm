@@ -494,6 +494,7 @@ def sparse_attn_indexer(
                     logits.stride(0),
                     logits.stride(1),
                     topk_tokens,
+                    attn_metadata_narrowed.seq_lens_cpu,
                 )
 
             _merge_dcp_topk_global(
@@ -641,6 +642,7 @@ def sparse_attn_indexer(
                 logits.stride(0),
                 logits.stride(1),
                 topk_tokens,
+                attn_metadata_narrowed.seq_lens_cpu,
             )
 
         if decode_metadata.global_seq_lens is not None:

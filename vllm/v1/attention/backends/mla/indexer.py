@@ -439,6 +439,9 @@ class DeepseekV32IndexerMetadata:
 
     decode: DeepSeekV32IndexerDecodeMetadata | None = None
     prefill: DeepseekV32IndexerPrefillMetadata | None = None
+    # Existing CPU scheduling view. It is an upper bound during async spec
+    # decode and is intended for host-side kernel selection only.
+    seq_lens_cpu: torch.Tensor | None = None
 
 
 def get_max_prefill_buffer_size(vllm_config: VllmConfig):
@@ -981,6 +984,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             num_prefill_tokens=num_prefill_tokens,
             prefill=prefill_metadata,
             decode=decode_metadata,
+            seq_lens_cpu=(
+                None
+                if common_attn_metadata.seq_lens_cpu_upper_bound is None
+                else common_attn_metadata.seq_lens_cpu_upper_bound[:num_reqs]
+            ),
         )
 
         return attn_metadata
