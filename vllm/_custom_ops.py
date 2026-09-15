@@ -2907,7 +2907,10 @@ def top_k_per_row_prefill(
     stride0: int,
     stride1: int,
     topk_tokens: int,
+    seq_lens_cpu: torch.Tensor | None = None,
 ) -> None:
+    # Native CUDA does not need host scheduling data. Platform plugins can
+    # consume this existing CPU tensor before launching their device kernel.
     torch.ops._C.top_k_per_row_prefill(
         logits,
         cu_seqlen_ks,
@@ -2929,7 +2932,9 @@ def top_k_per_row_decode(
     stride0: int,
     stride1: int,
     topk_tokens: int,
+    seq_lens_cpu: torch.Tensor | None = None,
 ) -> None:
+    # See top_k_per_row_prefill. Keep the native operator ABI unchanged.
     torch.ops._C.top_k_per_row_decode(
         logits,
         next_n,
