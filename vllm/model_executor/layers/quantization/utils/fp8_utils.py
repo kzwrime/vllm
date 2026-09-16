@@ -1344,11 +1344,14 @@ def validate_fp8_block_shape(
 def validate_fp8_block_shape_moe(
     intermediate_size_per_partition: int,
     block_size: list[int],
+    *,
+    tp_size: int | None = None,
 ) -> None:
     """Validate fused MoE block quantization shapes for tensor parallelism."""
-    from vllm.distributed import get_tensor_model_parallel_world_size
+    if tp_size is None:
+        from vllm.distributed import get_tensor_model_parallel_world_size
 
-    tp_size = get_tensor_model_parallel_world_size()
+        tp_size = get_tensor_model_parallel_world_size()
     block_n, block_k = block_size[0], block_size[1]
 
     # NOTE: To ensure proper alignment of the block-wise quantization

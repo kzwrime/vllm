@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import vllm.distributed as distributed
 from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm.model_executor.layers.fused_moe import (
     unquantized_fused_moe_method as unquantized_module,
@@ -39,13 +38,6 @@ def _make_fp8_tp_experts(
             "select_unquantized_moe_backend",
             lambda **kwargs: (None, None),
         )
-    monkeypatch.setattr(
-        fp8_module, "get_tensor_model_parallel_world_size", lambda: tp_size
-    )
-    # The block-shape validator imports this function from vllm.distributed.
-    monkeypatch.setattr(
-        distributed, "get_tensor_model_parallel_world_size", lambda: tp_size
-    )
     config = make_dummy_moe_config(
         num_experts=num_experts,
         hidden_dim=hidden_dim,

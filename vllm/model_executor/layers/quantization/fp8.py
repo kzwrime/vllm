@@ -7,7 +7,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )
@@ -550,11 +549,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 validate_fp8_block_shape_moe(
                     intermediate_size_per_partition,
                     self.weight_block_size,
+                    tp_size=self.moe.tp_size,
                 )
             else:
                 # Use the refined block grid for the scale parameters; the
                 # loader upsamples the checkpoint scales accordingly.
-                tp_size = get_tensor_model_parallel_world_size()
+                tp_size = self.moe.tp_size
                 if intermediate_size_per_partition % block_n != 0:
                     block_n, block_k = moe_block_shape
                 if tp_size > 1 and intermediate_size_per_partition % block_k != 0:
