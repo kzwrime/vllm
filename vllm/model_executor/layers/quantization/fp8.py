@@ -9,7 +9,6 @@ from torch.utils._python_dispatch import TorchDispatchMode
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
@@ -593,7 +592,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         if self.block_quant:
             assert self.weight_block_size is not None
             layer.weight_block_size = self.weight_block_size
-            tp_size = get_tensor_model_parallel_world_size()
+            tp_size = self.moe.tp_size
             block_n, block_k = (
                 self.weight_block_size[0],
                 self.weight_block_size[1],
