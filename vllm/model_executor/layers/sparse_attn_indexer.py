@@ -315,7 +315,7 @@ def sparse_attn_indexer(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
-) -> torch.Tensor:
+) -> None:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
     fp8_dtype = current_platform.fp8_dtype()
@@ -340,7 +340,7 @@ def sparse_attn_indexer(
             max_logits_elems, dtype=torch.uint8, device=hidden_states.device
         )
 
-        return sparse_attn_indexer_fake(
+        sparse_attn_indexer_fake(
             hidden_states,
             k_cache_prefix,
             kv_cache,
@@ -359,6 +359,7 @@ def sparse_attn_indexer(
             use_pcp,
             use_fp4_cache,
         )
+        return
     attn_metadata_narrowed = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata_narrowed, DeepseekV32IndexerMetadata)
     slot_mapping = attn_metadata_narrowed.slot_mapping
@@ -680,8 +681,6 @@ def sparse_attn_indexer(
                 topk_indices
             )
 
-    return topk_indices_buffer
-
 
 def sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
@@ -705,8 +704,8 @@ def sparse_attn_indexer_fake(
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
     skip_topk_buffer_clear: bool = False,
-) -> torch.Tensor:
-    return topk_indices_buffer
+) -> None:
+    return None
 
 
 direct_register_custom_op(

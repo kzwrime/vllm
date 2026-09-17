@@ -127,7 +127,13 @@ def _get_moe_router_dtype(
     if getattr(config, "model_type", None) == "glm_moe_dsa":
         # Older GLM-5/5.2 configs require fp32 routing but do not expose
         # moe_router_dtype yet.
-        return torch.float32
+        # return torch.float32
+
+        # XCPU note: glm_moe_dsa (GLM-5/5.2): routing scores are computed in fp32 inside
+        # torch_xcpu::grouped_topk regardless of logits dtype (bf16->fp32 is
+        # lossless), so router logits stay in bf16. An fp32 out_dtype here forces
+        # a prims::convert_element_type fallback in the compiled graph.
+        return None
     if router_dtype == "float32":
         return torch.float32
     return None
@@ -730,7 +736,7 @@ class Indexer(nn.Module):
 
     def forward(
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
-    ) -> torch.Tensor:
+    ) -> None:
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
 
@@ -758,9 +764,6 @@ class Indexer(nn.Module):
             weights = kw[:, self.head_dim :]
 
             k = self.k_norm(k)
-            k_pe, k_nope = torch.split(
-                k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
-            )
 
             q_fp8, weights = fused_indexer_q_rope_quant(
                 positions,
@@ -773,11 +776,24 @@ class Indexer(nn.Module):
             )
 
             # rotate only the MQA K
-            k_pe = k_pe.unsqueeze(1)
-            q_dummy = torch.empty_like(k_pe)
-            _, k_pe = rotary_emb(positions, q_dummy, k_pe)
-            k_pe = k_pe.reshape(-1, self.rope_dim)
-            k = torch.cat([k_pe, k_nope], dim=-1)
+            # Prefer an out-of-place fused rope when the backend provides one:
+            # the fallback mutates a view of the k_norm output in place and
+            # then re-cats the rotated/pass-through halves, which AOTAutograd
+            # functionalizes into compiler generated clone/cat copy kernels
+            # under torch.compile (and the cat of two adjacent slices of the
+            # same buffer is an identity copy anyway).
+            fused_k_rope = getattr(rotary_emb, "indexer_k_rope_out", None)
+            if fused_k_rope is not None:
+                k = fused_k_rope(positions, k)
+            else:
+                k_pe, k_nope = torch.split(
+                    k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
+                )
+                k_pe = k_pe.unsqueeze(1)
+                q_dummy = torch.empty_like(k_pe)
+                _, k_pe = rotary_emb(positions, q_dummy, k_pe)
+                k_pe = k_pe.reshape(-1, self.rope_dim)
+                k = torch.cat([k_pe, k_nope], dim=-1)
 
             return self.indexer_op(hidden_states, q_fp8, k, weights)
         else:

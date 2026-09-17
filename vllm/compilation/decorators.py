@@ -542,6 +542,11 @@ def _support_torch_compile(
             factors: list[str] = aot_compile_hash_factors(self.vllm_config)
 
             factors.append(_model_hash_key(self.forward))
+            # Direct-call attention platforms specialize the artifact on one
+            # batch structure (VLLM_XCPU_COMPILE_ROLE); distinct roles must
+            # not share cache entries, especially across PD-disaggregated
+            # nodes with a common VLLM_CACHE_ROOT.
+            factors.append(f"compile_role={envs.VLLM_XCPU_COMPILE_ROLE}")
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT,

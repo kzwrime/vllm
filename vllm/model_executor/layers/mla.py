@@ -173,9 +173,17 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         q = q.view(-1, heads, self.qk_head_dim)
 
         if self.rotary_emb is not None:
-            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                positions, q[..., self.qk_nope_head_dim :], k_pe
-            )
+            # Prefer an out-of-place fused rope when the backend provides one:
+            # the fallback mutates views of the q_b / qkv_a GEMM outputs in
+            # place, which AOTAutograd functionalizes into compiler generated
+            # clone/cat copy kernels under torch.compile.
+            fused_rope = getattr(self.rotary_emb, "mla_qk_rope_out", None)
+            if fused_rope is not None:
+                q, k_pe = fused_rope(positions, q, k_pe, self.qk_nope_head_dim)
+            else:
+                q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                    positions, q[..., self.qk_nope_head_dim :], k_pe
+                )
 
         if self.indexer and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
