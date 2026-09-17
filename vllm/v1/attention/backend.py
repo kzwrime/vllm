@@ -1063,6 +1063,33 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             kFp8Dynamic64Sym,
         )
 
+    def fused_mla_rope_kvcache_supported(self) -> bool:
+        """Whether this backend can replace MLA RoPE and cache insertion.
+
+        The default is deliberately false. Platform backends opt in only when
+        their cache-update semantics are fully covered by the fused operation.
+        Tensor shape support belongs to the operation itself: once a backend
+        opts in, an unsupported shape must fail at the operation boundary
+        instead of silently falling back.
+        """
+        return False
+
+    def do_fused_mla_rope_kvcache_update(
+        self,
+        q_pe: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        kv_cache_dtype: str,
+        k_scale: torch.Tensor,
+    ) -> None:
+        """Apply MLA Q/K RoPE and write the latent KV cache in one operation."""
+        raise NotImplementedError
+
     def do_kv_cache_update(
         self,
         kv_c_normed: torch.Tensor,

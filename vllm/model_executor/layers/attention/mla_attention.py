@@ -593,6 +593,58 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         return self._chunked_prefill_workspace_size
 
+    def fused_mla_rope_kvcache_supported(self) -> bool:
+        """Return whether this layer can replace RoPE plus cache insertion.
+
+        These checks describe semantic path compatibility, not kernel shape
+        coverage. Once a backend opts in, unsupported tensor shapes are
+        expected to fail in the fused operation rather than silently taking
+        the unfused path.
+        """
+        supports_fusion = getattr(self.impl, "fused_mla_rope_kvcache_supported", None)
+        return (
+            self.use_direct_call
+            and not self.use_pcp
+            and not self.calculate_kv_scales
+            and supports_fusion is not None
+            and supports_fusion()
+        )
+
+    def maybe_fused_mla_rope_kvcache_update(
+        self,
+        positions: torch.Tensor,
+        q_pe: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+    ) -> bool:
+        """Run the backend fused operation when runtime cache state is ready."""
+        if not self.fused_mla_rope_kvcache_supported():
+            return False
+
+        forward_context: ForwardContext = get_forward_context()
+        slot_mapping = forward_context.slot_mapping
+        if not isinstance(slot_mapping, dict):
+            return False
+        layer_slot_mapping = slot_mapping.get(self.layer_name)
+        if layer_slot_mapping is None or self.kv_cache.numel() == 0:
+            return False
+
+        self.impl.do_fused_mla_rope_kvcache_update(  # type: ignore[attr-defined]
+            q_pe,
+            k_pe,
+            kv_c_normed,
+            positions,
+            cos_sin_cache,
+            is_neox,
+            self.kv_cache,
+            layer_slot_mapping.flatten(),
+            self.kv_cache_dtype,
+            self._k_scale,
+        )
+        return True
+
     def forward(
         self,
         q: torch.Tensor,
@@ -600,6 +652,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
         q_dcp_replicated: torch.Tensor | None = None,
+        kv_cache_updated: bool = False,
     ) -> torch.Tensor:
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(
@@ -629,25 +682,26 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
             layer_slot_mapping = slot_mapping.get(self.layer_name)
             assert self.use_pcp is False, "use_pcp must be False."
-            kv_for_cache, kpe_for_cache, layer_slot_mapping = (
-                maybe_gather_mla_latent_cache_inputs(
-                    kv_c_normed,
-                    k_pe,
-                    layer_slot_mapping,
-                    attn_metadata.num_decode_tokens
-                    if attn_metadata is not None
-                    else None,
-                    self.use_pcp,
+            if not kv_cache_updated:
+                kv_for_cache, kpe_for_cache, layer_slot_mapping = (
+                    maybe_gather_mla_latent_cache_inputs(
+                        kv_c_normed,
+                        k_pe,
+                        layer_slot_mapping,
+                        attn_metadata.num_decode_tokens
+                        if attn_metadata is not None
+                        else None,
+                        self.use_pcp,
+                    )
                 )
-            )
-            self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
-                kv_for_cache,
-                kpe_for_cache,
-                self_kv_cache,
-                layer_slot_mapping,
-                self.kv_cache_dtype,
-                self._k_scale,
-            )
+                self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
+                    kv_for_cache,
+                    kpe_for_cache,
+                    self_kv_cache,
+                    layer_slot_mapping,
+                    self.kv_cache_dtype,
+                    self._k_scale,
+                )
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
             self.forward_impl(
                 q,
