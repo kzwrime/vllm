@@ -821,7 +821,9 @@ class SparseAttnIndexer(CustomOp):
                 raise NotImplementedError(
                     "The accelerated OOT sparse indexer supports FP8 Q/cache only"
                 )
-            if self.use_pcp or self.dcp_world_size != 1:
+            # PCP 会在此算子前收集 Prefill 的 indexer K 并展开 slot mapping，
+            # 加速内核接收展开后的布局；DCP 仍会改变本地序列布局，暂不支持。
+            if self.dcp_world_size != 1:
                 raise NotImplementedError(
                     "The accelerated OOT sparse indexer requires PCP=1 and DCP=1"
                 )
