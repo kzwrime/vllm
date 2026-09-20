@@ -299,6 +299,20 @@ class DFlashSpeculator(DraftModelSpeculator):
             causal=causal,
         )
 
+    def _combine_target_hidden_states(
+        self,
+        last_hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | torch.Tensor | None,
+    ) -> torch.Tensor:
+        if isinstance(aux_hidden_states, torch.Tensor):
+            logger.info_once("DFlash consumes packed aux directly without cat")
+            return self.model.combine_hidden_states(aux_hidden_states)
+        if aux_hidden_states:
+            return self.model.combine_hidden_states(
+                torch.cat(aux_hidden_states, dim=-1)
+            )
+        return last_hidden_states
+
     @torch.inference_mode()
     def propose(
         self,
@@ -308,7 +322,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         # [num_tokens, hidden_size]
         last_hidden_states: torch.Tensor,
         # num_layers x [num_tokens, hidden_size]
-        aux_hidden_states: list[torch.Tensor] | None,
+        aux_hidden_states: list[torch.Tensor] | torch.Tensor | None,
         # [num_reqs]
         num_sampled: torch.Tensor,
         # [num_reqs]
@@ -339,12 +353,9 @@ class DFlashSpeculator(DraftModelSpeculator):
         # number of rejected tokens, we maintain the size of input_ids and
         # hidden_states the same as the target model's. This means, we pad each
         # request's query length to include any rejected positions.
-        if aux_hidden_states:
-            hidden_states = self.model.combine_hidden_states(
-                torch.cat(aux_hidden_states, dim=-1)
-            )
-        else:
-            hidden_states = last_hidden_states
+        hidden_states = self._combine_target_hidden_states(
+            last_hidden_states, aux_hidden_states
+        )
         self.hidden_states[:num_target_tokens].copy_(hidden_states[:num_target_tokens])
 
         self._copy_request_inputs(

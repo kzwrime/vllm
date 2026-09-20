@@ -1686,7 +1686,7 @@ class ExecuteModelState(NamedTuple):
     attn_metadata: dict[str, Any] | None
     slot_mappings_by_layer: dict[str, torch.Tensor] | None
     hidden_states: torch.Tensor | None
-    aux_hidden_states: list[torch.Tensor] | None
+    aux_hidden_states: list[torch.Tensor] | torch.Tensor | None
     finished_req_ids: set[str]
 
 

@@ -43,8 +43,9 @@ class BaseSpeculator(ABC):
         slot_mappings: dict[str, torch.Tensor],
         # [num_tokens, hidden_size]
         last_hidden_states: torch.Tensor,
-        # num_layers x [num_tokens, hidden_size]
-        aux_hidden_states: list[torch.Tensor] | None,
+        # List of layer outputs, or packed [num_tokens, num_layers * hidden_size]
+        # for the XCPU DFlash2 path.
+        aux_hidden_states: list[torch.Tensor] | torch.Tensor | None,
         # [num_reqs]
         num_sampled: torch.Tensor,
         # [num_reqs]

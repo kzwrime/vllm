@@ -82,6 +82,24 @@ logger = init_logger(__name__)
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
+def _should_pack_dflash2_aux(vllm_config: VllmConfig) -> bool:
+    # Graph capture still owns a list of per-layer aux buffers. Keep its
+    # output contract unchanged; eager V2 can carry the packed tensor directly.
+    # Ordinary TP finishes attention/MLP all-reduces before residual sampling:
+    # each rank owns the full [T, H], so packing needs no extra collective.
+    # Sequence-parallel layouts are excluded separately in forward.
+    spec = vllm_config.speculative_config
+    parallel = vllm_config.parallel_config
+    return (
+        spec is not None
+        and spec.method == "dflash"
+        and "DFlash2DraftModel" in spec.draft_model_config.architectures
+        and parallel.pipeline_parallel_size == 1
+        and vllm_config.model_config.enforce_eager
+        and envs.VLLM_USE_V2_MODEL_RUNNER is True
+    )
+
+
 def _should_use_attn_reduce_scatter_for_moe(vllm_config: VllmConfig) -> bool:
     config = vllm_config.model_config.hf_text_config
     parallel_config = vllm_config.parallel_config
@@ -512,6 +530,7 @@ class Qwen3NextDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         positions: torch.Tensor = None,
+        aux_residual_out: torch.Tensor | None = None,
         **kwargs: object,
     ):
         full_num_tokens = positions.shape[-1]
@@ -519,6 +538,10 @@ class Qwen3NextDecoderLayer(nn.Module):
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
+        elif aux_residual_out is not None:
+            hidden_states, residual = self.input_layernorm.forward_with_residual_out(
+                hidden_states, residual, aux_residual_out
+            )
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
@@ -634,6 +657,7 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             self.norm = PPMissingLayer()
 
         self.aux_hidden_state_layers: tuple[int, ...] = ()
+        self._use_packed_aux_hidden_states = _should_pack_dflash2_aux(vllm_config)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -648,7 +672,11 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
+    ) -> (
+        torch.Tensor
+        | IntermediateTensors
+        | tuple[torch.Tensor, list[torch.Tensor] | torch.Tensor]
+    ):
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -665,7 +693,52 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
             hidden_states = sequence_parallel_chunk(hidden_states)
             assert residual is None
 
-        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        packed_aux = None
+        aux_slots: dict[int, torch.Tensor] = {}
+        if (
+            self._use_packed_aux_hidden_states
+            and self.aux_hidden_state_layers
+            and not self.use_sequence_parallel
+            and hidden_states.device.type in ("mcpu", "privateuseone")
+            and getattr(self.norm, "supports_packed_residual", False)
+            and all(
+                not layer._forward_pre_hooks
+                and not layer._forward_hooks
+                and getattr(layer.input_layernorm, "supports_packed_residual", False)
+                and getattr(
+                    layer.post_attention_layernorm, "supports_packed_residual", False
+                )
+                for layer in self.layers
+            )
+        ):
+            # Match the original traversal order, including optional embeddings.
+            sampled_layers = [
+                i
+                for i in range(self.end_layer + 1)
+                if i in self.aux_hidden_state_layers
+            ]
+            if sampled_layers:
+                logger.info_once(
+                    "XCPU DFlash2 packed aux enabled: layers=%s; "
+                    "norm residual outputs replace aux add/cat",
+                    tuple(sampled_layers),
+                )
+                tokens, width = hidden_states.shape
+                packed_aux = hidden_states.new_empty(
+                    (tokens, len(sampled_layers) * width)
+                )
+                aux_slots = {
+                    i: packed_aux[:, j * width : (j + 1) * width]
+                    for j, i in enumerate(sampled_layers)
+                }
+                if 0 in aux_slots:
+                    aux_slots[0].copy_(hidden_states)
+
+        aux_hidden_states = (
+            []
+            if packed_aux is not None
+            else self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        )
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
@@ -674,16 +747,29 @@ class Qwen3NextModel(nn.Module, EagleModelMixin):
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
+                **(
+                    {"aux_residual_out": aux_slots.get(layer_idx)}
+                    if packed_aux is not None
+                    else {}
+                ),
             )
-            self._maybe_add_hidden_state(
-                aux_hidden_states, layer_idx + 1, hidden_states, residual
-            )
+            if packed_aux is None:
+                self._maybe_add_hidden_state(
+                    aux_hidden_states, layer_idx + 1, hidden_states, residual
+                )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
-        hidden_states, _ = self.norm(hidden_states, residual)
+        if self.end_layer in aux_slots:
+            hidden_states, _ = self.norm.forward_with_residual_out(
+                hidden_states, residual, aux_slots[self.end_layer]
+            )
+        else:
+            hidden_states, _ = self.norm(hidden_states, residual)
+        if packed_aux is not None:
+            return hidden_states, packed_aux
         if self.use_sequence_parallel:
             if aux_hidden_states:
                 hidden_size = hidden_states.shape[-1]
