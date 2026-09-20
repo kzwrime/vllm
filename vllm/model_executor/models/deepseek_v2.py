@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only DeepseekV2/DeepseekV3 model."""
 
+import os
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -1490,6 +1491,12 @@ class DeepseekV2Model(nn.Module):
             llama_4_scaling = None
 
         aux_hidden_states = []
+        debug_layer_memory = os.getenv("VLLM_XCPU_DEBUG_LAYER_MEMORY") == "1"
+        debug_pending_kernels = os.getenv("VLLM_XCPU_DEBUG_PENDING_KERNELS") == "1"
+        if debug_pending_kernels:
+            torch.mcpu.reset_kernel_timing()
+            torch.mcpu.set_kernel_timing_enabled(True)
+        layer_memory_rows: list[tuple[int, int, int, int, int, int]] = []
         # A token-row shape cannot encode SP state when num_tokens < TP size:
         # both a full tensor and a padded shard may contain one row. Track the
         # layout across layer boundaries instead of inferring it from shape.
@@ -1532,6 +1539,48 @@ class DeepseekV2Model(nn.Module):
                 ),
             )
             hidden_states_are_sequence_parallel = layer_uses_sequence_parallel
+            if debug_layer_memory:
+                stats = torch.accelerator.memory_stats()
+                proc_status: dict[str, int] = {}
+                with open("/proc/self/status") as status_file:
+                    for line in status_file:
+                        key, _, value = line.partition(":")
+                        if key in ("VmSize", "VmRSS"):
+                            proc_status[key] = int(value.split()[0]) * 1024
+                layer_memory_rows.append(
+                    (
+                        idx,
+                        stats["allocated_bytes.all.current"],
+                        stats["allocated_bytes.all.peak"],
+                        stats["reserved_bytes.all.current"],
+                        proc_status["VmSize"],
+                        proc_status["VmRSS"],
+                    )
+                )
+            if debug_pending_kernels:
+                pending: dict[str, int] = {}
+                for thread in torch.mcpu.get_kernel_timing():
+                    for event in thread.get("events", []):
+                        if int(event.get("end_time", 0)) == 0:
+                            name = str(event.get("name", ""))
+                            pending[name] = pending.get(name, 0) + 1
+                logger.warning(
+                    "XCPU_PENDING_KERNELS layer=%d total=%d names=%s",
+                    idx,
+                    sum(pending.values()),
+                    pending,
+                )
+
+        if debug_layer_memory:
+            for row in layer_memory_rows:
+                logger.warning(
+                    "XCPU_LAYER_MEMORY layer=%d allocated=%d peak=%d "
+                    "reserved=%d vmsize=%d rss=%d tokens=%d",
+                    *row,
+                    positions.shape[0],
+                )
+        if debug_pending_kernels:
+            torch.mcpu.set_kernel_timing_enabled(False)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
