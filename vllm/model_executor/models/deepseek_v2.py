@@ -120,6 +120,34 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _restore_full_token_layout(
+    hidden_states: torch.Tensor,
+    residual: torch.Tensor,
+    num_tokens: int,
+    *,
+    is_sequence_parallel: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Restore an explicitly tracked sequence-parallel token layout.
+
+    Token-row shapes are ambiguous when ``num_tokens < TP size`` because both
+    a full tensor and a padded SP shard can have one row.  Callers must carry
+    the layout state instead of inferring it from the tensor shape.
+    """
+    if not is_sequence_parallel:
+        return hidden_states, residual
+
+    hidden_size = hidden_states.shape[-1]
+    residual_size = residual.shape[-1]
+    combined_states = torch.cat([hidden_states, residual], dim=-1)
+    combined_states = tensor_model_parallel_all_gather(combined_states, 0)
+    combined_states = combined_states[:num_tokens]
+    hidden_states, residual = combined_states.split(
+        [hidden_size, residual_size], dim=-1
+    )
+    # fused_add_rms_norm requires a contiguous residual.
+    return hidden_states, residual.contiguous()
+
+
 def _get_moe_router_dtype(
     config: DeepseekV2Config | DeepseekV3Config,
 ) -> torch.dtype | None:
@@ -1292,16 +1320,10 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         llama_4_scaling: torch.Tensor | None = None,
+        input_is_sequence_parallel: bool = False,
     ) -> torch.Tensor:
         full_num_tokens = positions.shape[0]
-        input_is_sequence_parallel = (
-            self.use_sequence_parallel_moe
-            and residual is not None
-            and (
-                hidden_states.shape[0] != full_num_tokens
-                or full_num_tokens < get_tensor_model_parallel_world_size()
-            )
-        )
+        assert not input_is_sequence_parallel or self.use_sequence_parallel_moe
 
         # Self Attention
         if residual is None:
@@ -1468,49 +1490,61 @@ class DeepseekV2Model(nn.Module):
             llama_4_scaling = None
 
         aux_hidden_states = []
+        # A token-row shape cannot encode SP state when num_tokens < TP size:
+        # both a full tensor and a padded shard may contain one row. Track the
+        # layout across layer boundaries instead of inferring it from shape.
+        hidden_states_are_sequence_parallel = False
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
+            layer_uses_sequence_parallel = getattr(
+                layer, "use_sequence_parallel_moe", False
+            )
             # all gather if we need to use the whole states
-            if (
-                hidden_states.shape[0] != positions.shape[0]
-                and not layer.use_sequence_parallel_moe
-            ):
-                combined_states = torch.cat([hidden_states, residual], dim=-1)
-                combined_states = tensor_model_parallel_all_gather(combined_states, 0)
-                combined_states = combined_states[: positions.shape[0]]
-                hidden_states, residual = combined_states.split(
-                    [self.hidden_size, self.hidden_size], dim=-1
+            if hidden_states_are_sequence_parallel and not layer_uses_sequence_parallel:
+                hidden_states, residual = _restore_full_token_layout(
+                    hidden_states,
+                    residual,
+                    positions.shape[0],
+                    is_sequence_parallel=True,
                 )
-                # fused_add_rms_norm requires a contiguous residual
-                residual = residual.contiguous()
+                hidden_states_are_sequence_parallel = False
             if idx in self.aux_hidden_state_layers:
-                aux_hidden_state = hidden_states + residual
-                if aux_hidden_state.shape[0] != positions.shape[0]:
+                aux_hidden_state = (
+                    hidden_states if residual is None else hidden_states + residual
+                )
+                if hidden_states_are_sequence_parallel:
                     aux_hidden_state = tensor_model_parallel_all_gather(
                         aux_hidden_state, 0
                     )
                     aux_hidden_state = aux_hidden_state[: positions.shape[0]]
                 aux_hidden_states.append(aux_hidden_state)
             hidden_states, residual = layer(
-                positions, hidden_states, residual, llama_4_scaling
+                positions,
+                hidden_states,
+                residual,
+                llama_4_scaling,
+                **(
+                    {"input_is_sequence_parallel": True}
+                    if hidden_states_are_sequence_parallel
+                    else {}
+                ),
             )
+            hidden_states_are_sequence_parallel = layer_uses_sequence_parallel
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        if hidden_states.shape[0] != positions.shape[0]:
-            combined_states = torch.cat([hidden_states, residual], dim=-1)
-            combined_states = tensor_model_parallel_all_gather(combined_states, 0)
-            combined_states = combined_states[: positions.shape[0]]
-            hidden_states, residual = combined_states.split(
-                [self.hidden_size, self.hidden_size], dim=-1
+        if hidden_states_are_sequence_parallel:
+            hidden_states, residual = _restore_full_token_layout(
+                hidden_states,
+                residual,
+                positions.shape[0],
+                is_sequence_parallel=True,
             )
-            # fused_add_rms_norm requires a contiguous residual
-            residual = residual.contiguous()
 
         if self.end_layer in self.aux_hidden_state_layers:
             aux_hidden_states.append(hidden_states + residual)

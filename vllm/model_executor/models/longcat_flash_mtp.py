@@ -23,7 +23,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.longcat_flash import FlashConfig
 from vllm.sequence import IntermediateTensors
 
-from .deepseek_v2 import DeepseekV2DecoderLayer
+from .deepseek_v2 import DeepseekV2DecoderLayer, _restore_full_token_layout
 from .utils import maybe_prefix
 
 
@@ -66,6 +66,12 @@ class LongCatMultiTokenPredictorLayer(nn.Module):
 
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
+        )
+        hidden_states, residual = _restore_full_token_layout(
+            hidden_states,
+            residual,
+            positions.shape[0],
+            is_sequence_parallel=self.mtp_block.use_sequence_parallel_moe,
         )
         hidden_states, _ = self.final_layernorm(hidden_states, residual)
         return hidden_states

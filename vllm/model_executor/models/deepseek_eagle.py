@@ -24,6 +24,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2DecoderLayer,
     DeepseekV3ForCausalLM,
+    _restore_full_token_layout,
 )
 
 from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
@@ -87,12 +88,30 @@ class DeepseekV2Model(nn.Module):
         )
         hidden_states = self.fc(inputs)
         residual = None
+        hidden_states_are_sequence_parallel = False
         for layer in self.layers:
+            layer_uses_sequence_parallel = layer.use_sequence_parallel_moe
+            if hidden_states_are_sequence_parallel and not layer_uses_sequence_parallel:
+                hidden_states, residual = _restore_full_token_layout(
+                    hidden_states,
+                    residual,
+                    positions.shape[0],
+                    is_sequence_parallel=True,
+                )
+                hidden_states_are_sequence_parallel = False
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
+                input_is_sequence_parallel=hidden_states_are_sequence_parallel,
             )
+            hidden_states_are_sequence_parallel = layer_uses_sequence_parallel
+        hidden_states, residual = _restore_full_token_layout(
+            hidden_states,
+            residual,
+            positions.shape[0],
+            is_sequence_parallel=hidden_states_are_sequence_parallel,
+        )
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states, hidden_states
 
