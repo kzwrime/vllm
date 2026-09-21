@@ -409,7 +409,9 @@ def sparse_attn_indexer(
     # [:num_tokens, :topk] region earlier in this forward, so skip the redundant
     # fill.
     if not skip_topk_buffer_clear:
-        topk_indices_buffer[: hidden_states.shape[0]] = -1
+        # fill_ on the view launches one kernel; the setitem-with-int form
+        # goes through scalar_tensor + expand + broadcast copy_ on PrivateUse1.
+        topk_indices_buffer[: hidden_states.shape[0]].fill_(-1)
     if has_prefill:
         prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
