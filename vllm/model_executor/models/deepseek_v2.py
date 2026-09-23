@@ -145,8 +145,10 @@ def _restore_full_token_layout(
     hidden_states, residual = combined_states.split(
         [hidden_size, residual_size], dim=-1
     )
-    # fused_add_rms_norm requires a contiguous residual.
-    return hidden_states, residual.contiguous()
+    # XCPU fused_add_rms_norm consumes both row-strided split views directly.
+    if current_platform.device_name != "mcpu":
+        residual = residual.contiguous()
+    return hidden_states, residual
 
 
 def _get_moe_router_dtype(
