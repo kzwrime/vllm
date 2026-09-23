@@ -173,6 +173,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         q = q.view(-1, heads, self.qk_head_dim)
 
         kv_cache_updated = False
+        q_is_projected = False
         if self.rotary_emb is not None:
             # Preferred: one fused op producing the final attention query
             # (roped q_pe + up-projected nope) plus the KV cache update. This
@@ -197,6 +198,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 )
                 if new_q is not None:
                     q = new_q
+                    q_is_projected = True
                     kv_cache_updated = True
             if not kv_cache_updated:
                 if (
@@ -238,6 +240,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
             q_dcp_replicated=q_dcp_replicated,
             kv_cache_updated=kv_cache_updated,
+            q_is_projected=q_is_projected,
         )
 
         return self.o_proj(attn_out)[0]

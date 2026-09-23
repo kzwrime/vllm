@@ -209,6 +209,7 @@ from vllm.config import (
     get_current_vllm_config_or_none,
 )
 from vllm.config.cache import CacheDType
+from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_tp_group,
@@ -571,6 +572,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         # Attributes for forward_impl method
         self._vllm_config = get_current_vllm_config()
+        self._use_shape_token_count = (
+            self.use_direct_call
+            # MCPU registers PrivateUse1; device_type is "privateuseone".
+            and current_platform.device_name == "mcpu"
+            and not self.use_pcp
+            and self._vllm_config.compilation_config.cudagraph_mode
+            == CUDAGraphMode.NONE
+        )
         self._chunked_prefill_workspace_size: int | None = None
         self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
             static=True,
@@ -715,6 +724,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         output_shape: torch.Size | None = None,
         q_dcp_replicated: torch.Tensor | None = None,
         kv_cache_updated: bool = False,
+        q_is_projected: bool = False,
     ) -> torch.Tensor:
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(
@@ -773,9 +783,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 attn_metadata,
                 output=output,
                 q_dcp_replicated=q_dcp_replicated,
+                q_is_projected=q_is_projected,
             )
             return output
         else:
+            assert not q_is_projected, "Projected MLA queries require direct calls"
             encoded = _encode_layer_name(self.layer_name)
             kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed,
@@ -811,6 +823,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         quant_col_major: bool | None = None,
         quant_tma_aligned: bool | None = None,
         q_dcp_replicated: torch.Tensor | None = None,
+        q_is_projected: bool = False,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
@@ -858,19 +871,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
 
-        # Shape-derived on purpose: reading attn_metadata.num_actual_tokens
-        # (a python int) freezes the traced token dim to a static size and
-        # forces static<->dynamic materialization copies around every
-        # downstream slice. The input is never padded on platforms without
-        # full-graph capture, so q.size(0) is the actual token count.
-        # Validate the equivalence only outside tracing: an int == SymInt
-        # comparison in the traced region lowers to an Eq guard that conflicts
-        # with the mark_dynamic constraints on input_ids/positions.
-        if not torch.compiler.is_compiling():
-            assert attn_metadata.num_actual_tokens == q.shape[0], (
-                "q rows must equal num_actual_tokens when the input is unpadded"
-            )
-        num_actual_toks = q.shape[0]
+        # Only the unpadded MCPU direct-call graph can derive this symbolically.
+        # Eager and opaque/padded paths retain metadata-based slicing.
+        num_actual_toks = (
+            q.shape[0]
+            if self._use_shape_token_count and torch.compiler.is_compiling()
+            else attn_metadata.num_actual_tokens
+        )
         if self.use_pcp and self.impl.dcp_world_size > 1 and quant_key is not None:
             raise NotImplementedError(
                 "MRV2 MLA PCP+DCP does not support fused output quantization yet."
@@ -963,8 +970,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # q may already be the final attention query produced by the fused
             # rope + up-projection + concat op; skip the split / up-projection
             # / concat below in that case.
-            if mqa_q.shape[-1] == self.kv_lora_rank + self.qk_rope_head_dim:
-                pass
+            if q_is_projected:
+                assert q_dcp_replicated is None
+                assert mqa_q.shape[-1] == self.kv_lora_rank + self.qk_rope_head_dim
             else:
                 mqa_q_nope, mqa_q_pe = mqa_q.split(
                     [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
