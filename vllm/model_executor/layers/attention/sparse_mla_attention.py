@@ -123,7 +123,10 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         req_id_per_token = np.repeat(
             np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths
         )
-        self.req_id_per_token_buffer.fill_(0)
+        # Only [:num_tokens] is consumed downstream and the copy below
+        # overwrites that whole prefix, so no full-buffer clear is needed
+        # (a full [max_num_tokens] int32 fill showed up as a hot per-step
+        # kernel in profiles).
         self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
             np_to_pinned_tensor(req_id_per_token), non_blocking=True
         )

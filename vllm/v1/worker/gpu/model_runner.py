@@ -231,6 +231,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
+        # Persistent [0..max_num_reqs] ramp / zero row for the no-draft-token
+        # path in prepare_inputs; slicing them per step avoids a device
+        # arange/zeros launch every step. Both are read-only downstream.
+        self._cu_num_logits_buf = torch.arange(
+            self.max_num_reqs + 1, device=self.device, dtype=torch.int32
+        )
+        self._expanded_local_pos_buf = torch.zeros(
+            self.max_num_reqs, device=self.device, dtype=torch.int32
+        )
         if self.use_pp:
             self.pp_handler = PPHandler(
                 max_num_reqs=self.max_num_reqs,
@@ -918,11 +927,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert num_tokens > 0
         if envs.VLLM_MOE_SKIP_PADDING:
             # Mark trailing cudagraph-padding rows so kernels can skip work for
-            # them when supported.
+            # them when supported. Without cudagraph padding there is no tail
+            # to mark; skip the empty fill (it still enqueues a kernel).
             self.input_buffers.is_padding[:num_tokens].fill_(False)
-            self.input_buffers.is_padding[num_tokens:num_tokens_after_padding].fill_(
-                True
-            )
+            if num_tokens_after_padding > num_tokens:
+                self.input_buffers.is_padding[
+                    num_tokens:num_tokens_after_padding
+                ].fill_(True)
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
 
@@ -943,13 +954,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             total_num_draft_tokens = 0
             total_num_logits = num_reqs
             cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
-            cu_num_logits = torch.arange(
-                num_reqs + 1, device=self.device, dtype=torch.int32
-            )
+            cu_num_logits = self._cu_num_logits_buf[: num_reqs + 1]
             expanded_idx_mapping = idx_mapping
-            expanded_local_pos = torch.zeros(
-                num_reqs, dtype=torch.int32, device=self.device
-            )
+            expanded_local_pos = self._expanded_local_pos_buf[:num_reqs]
         else:
             num_draft_tokens_per_req = np.fromiter(
                 (len(draft_tokens.get(req_id, ())) for req_id in req_ids),

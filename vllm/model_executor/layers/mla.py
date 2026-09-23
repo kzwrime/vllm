@@ -173,26 +173,55 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         q = q.view(-1, heads, self.qk_head_dim)
 
         kv_cache_updated = False
+        q_is_projected = False
         if self.rotary_emb is not None:
+            # Preferred: one fused op producing the final attention query
+            # (roped q_pe + up-projected nope) plus the KV cache update. This
+            # avoids the in-place rope write on the q projection view, which
+            # forces functionalization clones under torch.compile.
             if (
                 getattr(self.rotary_emb, "supports_mla_rope_kvcache_fusion", False)
-                and self.mla_attn.fused_mla_rope_kvcache_supported()
+                and not self.dcp_q_replicate
+                and llama_4_scaling is None
+                and self.mla_attn.fused_mla_rope_qproj_kvcache_supported()
             ):
                 cos_sin_cache = self.rotary_emb._match_cos_sin_cache_dtype(
                     q[..., self.qk_nope_head_dim :]
                 )
-                kv_cache_updated = self.mla_attn.maybe_fused_mla_rope_kvcache_update(
+                new_q = self.mla_attn.maybe_fused_mla_rope_qproj_kvcache_update(
                     positions,
-                    q[..., self.qk_nope_head_dim :],
+                    q,
                     k_pe,
                     kv_c_normed,
                     cos_sin_cache,
                     self.rotary_emb.is_neox_style,
                 )
+                if new_q is not None:
+                    q = new_q
+                    q_is_projected = True
+                    kv_cache_updated = True
             if not kv_cache_updated:
-                q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                    positions, q[..., self.qk_nope_head_dim :], k_pe
-                )
+                if (
+                    getattr(self.rotary_emb, "supports_mla_rope_kvcache_fusion", False)
+                    and self.mla_attn.fused_mla_rope_kvcache_supported()
+                ):
+                    cos_sin_cache = self.rotary_emb._match_cos_sin_cache_dtype(
+                        q[..., self.qk_nope_head_dim :]
+                    )
+                    kv_cache_updated = (
+                        self.mla_attn.maybe_fused_mla_rope_kvcache_update(
+                            positions,
+                            q[..., self.qk_nope_head_dim :],
+                            k_pe,
+                            kv_c_normed,
+                            cos_sin_cache,
+                            self.rotary_emb.is_neox_style,
+                        )
+                    )
+                if not kv_cache_updated:
+                    q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                        positions, q[..., self.qk_nope_head_dim :], k_pe
+                    )
 
         if self.indexer and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
@@ -211,6 +240,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
             q_dcp_replicated=q_dcp_replicated,
             kv_cache_updated=kv_cache_updated,
+            q_is_projected=q_is_projected,
         )
 
         return self.o_proj(attn_out)[0]
