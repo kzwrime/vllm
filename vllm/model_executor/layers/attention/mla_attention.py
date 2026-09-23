@@ -663,7 +663,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             supports is not None
             and supports()
             and self.fused_mla_rope_kvcache_supported()
-            and not is_quantized_kv_cache(self.kv_cache_dtype)
             and self.q_pad_num_heads is None
             and self.W_UK_T is not None
         )
