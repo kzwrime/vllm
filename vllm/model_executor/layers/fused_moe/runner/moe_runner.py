@@ -413,6 +413,19 @@ class MoERunner(MoERunnerInterface):
             and self._quant_method.moe_kernel.output_is_reduced()
         )
 
+    def _combine_shared_expert_output(
+        self,
+        shared_output: torch.Tensor | None,
+        fused_output: torch.Tensor,
+    ) -> torch.Tensor:
+        shared_output, fused_output = self._maybe_apply_routed_scale_to_output(
+            shared_output, fused_output
+        )
+        fused_output = self.apply_routed_output_transform(fused_output)
+        if shared_output is not None:
+            return shared_output + fused_output
+        return fused_output
+
     def _maybe_reduce_shared_expert_output(
         self,
         shared_output: torch.Tensor | None,
@@ -712,17 +725,7 @@ class MoERunner(MoERunnerInterface):
         # See note above re: the two all-reduce points.
         shared_output = self._maybe_reduce_shared_expert_output(shared_output)
 
-        shared_output, fused_output = self._maybe_apply_routed_scale_to_output(
-            shared_output, fused_output
-        )
-
-        # Apply output transform (e.g. latent -> full dim)
-        fused_output = self.apply_routed_output_transform(fused_output)
-
-        if shared_output is not None:
-            result = shared_output + fused_output
-        else:
-            result = fused_output
+        result = self._combine_shared_expert_output(shared_output, fused_output)
 
         result = self._maybe_reduce_final_output(result, og_hidden_dim_post_xform)
 
