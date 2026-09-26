@@ -408,7 +408,20 @@ def sparse_attn_indexer(
     # nvidia path, _fused_norm_rope_kernel already cleared the same
     # [:num_tokens, :topk] region earlier in this forward, so skip the redundant
     # fill.
-    if not skip_topk_buffer_clear:
+    # XCPU decode TopK writes all K entries, including -1 for short/empty
+    # contexts. Only omit the clear when every buffer row consumed by this
+    # forward is covered; retain it for mixed batches and graph padding.
+    decode = attn_metadata_narrowed.decode
+    xcpu_decode_overwrites_buffer = (
+        current_platform.device_name == "mcpu"
+        and has_decode
+        and not has_prefill
+        and decode is not None
+        and not decode.requires_padding
+        and num_decode_tokens == hidden_states.shape[0]
+        and topk_indices_buffer.shape[1] == topk_tokens
+    )
+    if not skip_topk_buffer_clear and not xcpu_decode_overwrites_buffer:
         # fill_ on the view launches one kernel; the setitem-with-int form
         # goes through scalar_tensor + expand + broadcast copy_ on PrivateUse1.
         topk_indices_buffer[: hidden_states.shape[0]].fill_(-1)
