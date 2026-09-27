@@ -7,6 +7,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils import random_uuid
+from vllm.v1.worker.gpu import mcpu_ops
 
 
 class InputBuffers:
@@ -441,9 +442,42 @@ def get_num_sampled_and_rejected(
     cu_num_logits: torch.Tensor,
     idx_mapping: torch.Tensor,
     prefill_len: torch.Tensor,
+    *,
+    out: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_reqs = idx_mapping.shape[0]
-    num_rejected = torch.empty_like(num_sampled)
+    if out is None:
+        num_rejected = torch.empty_like(num_sampled)
+    else:
+        if out.device != num_sampled.device:
+            raise ValueError(
+                "out and num_sampled must be on the same device, got "
+                f"{out.device} and {num_sampled.device}"
+            )
+        if out.dtype != num_sampled.dtype:
+            raise ValueError(
+                "out and num_sampled must have the same dtype, got "
+                f"{out.dtype} and {num_sampled.dtype}"
+            )
+        if out.ndim != 1:
+            raise ValueError(f"out must be one-dimensional, got shape {out.shape}")
+        if out.stride(0) != 1:
+            raise ValueError(f"out must be contiguous, got stride {out.stride()}")
+        if out.shape[0] < num_reqs:
+            raise ValueError(
+                f"out must have capacity for {num_reqs} elements, got {out.shape[0]}"
+            )
+        num_rejected = out[:num_reqs]
+
+    if mcpu_ops.try_get_num_sampled_and_rejected(
+        num_sampled,
+        num_rejected,
+        seq_lens,
+        cu_num_logits,
+        idx_mapping,
+        prefill_len,
+    ):
+        return num_sampled, num_rejected
     _get_num_sampled_and_rejected_kernel[(num_reqs,)](
         num_sampled,
         num_rejected,
@@ -539,6 +573,19 @@ def post_update(
     total_len: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
+    if mcpu_ops.try_post_update(
+        idx_mapping,
+        num_computed_tokens,
+        last_sampled_tokens,
+        output_bin_counts,
+        sampled_tokens,
+        num_sampled,
+        num_rejected,
+        query_start_loc,
+        all_token_ids,
+        total_len,
+    ):
+        return
     _post_update_kernel[(num_reqs,)](
         idx_mapping,
         num_computed_tokens,

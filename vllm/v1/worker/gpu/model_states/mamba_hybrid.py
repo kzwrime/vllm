@@ -19,6 +19,7 @@ from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilde
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.gpu import mcpu_ops
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
@@ -305,7 +306,9 @@ class MambaHybridModelState(DefaultModelState):
             # idx_mapping may contain -1 sentinels (filtered rows) under PP; the
             # kernel skips them rather than scattering with a host-side gather.
             n = idx_mapping.shape[0]
-            if n:
+            if n and not mcpu_ops.try_scatter_num_accepted(
+                idx_mapping, num_sampled, self.num_accepted_tokens_gpu
+            ):
                 _scatter_num_accepted_kernel[(n,)](
                     idx_mapping, num_sampled, self.num_accepted_tokens_gpu
                 )
