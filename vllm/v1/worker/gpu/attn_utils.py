@@ -19,6 +19,8 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
+    AttentionMetadata,
+    AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
 from vllm.v1.kv_cache_interface import (
@@ -542,6 +544,9 @@ def build_attn_metadata(
 
     attn_metadata: dict[str, Any] = {}
     num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
+    cached_attn_metadata: dict[
+        tuple[KVCacheSpec, type[AttentionMetadataBuilder]], AttentionMetadata
+    ] = {}
     for i in range(num_kv_cache_groups):
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
@@ -587,19 +592,37 @@ def build_attn_metadata(
                     common_attn_metadata
                 )
             else:
-                attn_metadata_extra_kwargs = (
-                    model_specific_attn_metadata.get_extra_attn_kwargs(
-                        attn_metadata_builder,
-                        num_reqs,
+                kv_cache_spec = kv_cache_config.kv_cache_groups[i].kv_cache_spec
+                if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                    kv_cache_spec = kv_cache_spec.kv_cache_specs[
+                        attn_group.layer_names[0]
+                    ]
+                cache_key = (kv_cache_spec, type(attn_metadata_builder))
+                if (
+                    cache_key in cached_attn_metadata
+                    and attn_metadata_builder.supports_update_block_table
+                ):
+                    metadata = attn_metadata_builder.update_block_table(
+                        cached_attn_metadata[cache_key],
+                        common_attn_metadata.block_table_tensor,
+                        common_attn_metadata.slot_mapping,
                     )
-                    if model_specific_attn_metadata is not None
-                    else {}
-                )
-                metadata = attn_metadata_builder.build(
-                    common_prefix_len=0,
-                    common_attn_metadata=common_attn_metadata,
-                    **attn_metadata_extra_kwargs,
-                )
+                else:
+                    attn_metadata_extra_kwargs = (
+                        model_specific_attn_metadata.get_extra_attn_kwargs(
+                            attn_metadata_builder,
+                            num_reqs,
+                        )
+                        if model_specific_attn_metadata is not None
+                        else {}
+                    )
+                    metadata = attn_metadata_builder.build(
+                        common_prefix_len=0,
+                        common_attn_metadata=common_attn_metadata,
+                        **attn_metadata_extra_kwargs,
+                    )
+                    if attn_metadata_builder.supports_update_block_table:
+                        cached_attn_metadata[cache_key] = metadata
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
     return attn_metadata
