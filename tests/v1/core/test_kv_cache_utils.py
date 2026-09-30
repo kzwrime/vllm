@@ -4,6 +4,7 @@ import copy
 import hashlib
 import importlib
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,6 +14,7 @@ import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.attention.attention import Attention
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
@@ -21,6 +23,7 @@ from vllm.multimodal.inputs import (
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor
 from vllm.utils.mem_constants import GiB_bytes
+from vllm.v1.attention.backend import AttentionBackend, AttentionType, MultipleOf
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -2854,3 +2857,51 @@ def test_resolve_block_hashes_rejects_mismatched_view():
     mismatched = BlockHashListWithBlockSize(raw, 2, 8)
     with pytest.raises(AssertionError):
         resolve_block_hashes(mismatched, 2, 4)
+
+
+@pytest.mark.parametrize("disable_hybrid", [False, True])
+def test_sliding_draft_cache_shares_mla_block_table_without_hybrid(disable_hybrid):
+    """Mixed MLA/indexer/SWA draft pages need a common full-cache block size."""
+
+    class DraftBackend(AttentionBackend):
+        @staticmethod
+        def get_supported_kernel_block_sizes():
+            return [MultipleOf(16)]
+
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=64, skip_page_size_padded=None),
+        scheduler_config=SimpleNamespace(
+            disable_hybrid_kv_cache_manager=disable_hybrid
+        ),
+    )
+    layer = SimpleNamespace(
+        attn_type=AttentionType.DECODER,
+        kv_cache_dtype="auto",
+        kv_cache_torch_dtype=torch.bfloat16,
+        sliding_window=2048,
+        attn_backend=DraftBackend,
+        num_kv_heads=8,
+        head_size=128,
+        head_size_v=128,
+    )
+    draft_spec = Attention.get_kv_cache_spec(layer, config)
+    assert draft_spec.block_size == 64
+    assert draft_spec.sliding_window == 2048
+    if disable_hybrid:
+        specs = {
+            "indexer": MLAAttentionSpec(
+                block_size=64, num_kv_heads=1, head_size=132, dtype=torch.uint8
+            ),
+            "mla": MLAAttentionSpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=576,
+                dtype=torch.uint8,
+                cache_dtype_str="fp8_ds_mla",
+            ),
+            "draft": draft_spec,
+        }
+        groups = kv_cache_utils.get_kv_cache_groups(config, specs)
+        assert len(groups) == 1
+        assert set(groups[0].layer_names) == set(specs)
+        assert specs["draft"].sliding_window == 2048

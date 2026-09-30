@@ -1472,6 +1472,11 @@ class VllmConfig:
 
         if self.use_v2_model_runner:
             self._validate_v2_model_runner()
+        elif self._is_dflash2_draft() or self._dflash_needs_multi_kv_group():
+            raise ValueError(
+                "DFlash2 and mixed sliding/full DFlash drafts require Model "
+                "Runner V2. Remove VLLM_USE_V2_MODEL_RUNNER=0."
+            )
 
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
