@@ -147,3 +147,22 @@ def test_build_draft_attn_metadata_clamps_to_max_model_len():
     bound = captured["seq_lens_cpu_upper_bound"]
     # 1023 + 3 = 1026 -> clamped to 1024; 500 + 3 = 503 unaffected.
     assert torch.equal(bound, torch.tensor([1024, 503], dtype=torch.int32))
+
+
+def test_uniform_attention_excludes_dp_padding_outside_full_graph():
+    """DP padding has no request owner in eager and PIECEWISE attention."""
+    for mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL):
+        fake = _make_fake_speculator(max_num_tokens=32)
+        captured = _run_build(
+            fake,
+            num_reqs=2,
+            num_reqs_padded=4,
+            base=torch.tensor([10, 20]),
+            step=6,
+            num_query_per_req=6,
+            cg_mode=mode,
+        )
+        expected_tokens = 24 if mode == CUDAGraphMode.FULL else 12
+        assert captured["num_tokens"] == expected_tokens
+        assert captured["slot_mappings"].shape[-1] == expected_tokens
+        assert captured["query_start_loc_cpu"].tolist() == [0, 6, 12, 12, 12]

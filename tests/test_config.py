@@ -257,6 +257,19 @@ def test_dflash2_draft_forces_v2_model_runner():
     )
 
 
+def test_dflash2_rejects_explicit_v1_runner():
+    config = VllmConfig()
+    config.speculative_config = cast(
+        SpeculativeConfig,
+        SimpleNamespace(
+            method="dflash",
+            draft_model_config=SimpleNamespace(architectures=["DFlash2DraftModel"]),
+        ),
+    )
+    with pytest.raises(ValueError, match="require Model Runner V2"):
+        config._validate_v1_model_runner()
+
+
 @pytest.mark.parametrize(
     ("use_v2_model_runner", "expected_capture_sizes"),
     [
