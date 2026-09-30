@@ -169,6 +169,7 @@ class DFlashQwen3Attention(nn.Module):
         add_swa_attention_sink_bias: bool = False,
         sliding_window: int | None = None,
         causal: bool = False,
+        is_neox_style: bool = True,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -213,6 +214,7 @@ class DFlashQwen3Attention(nn.Module):
             self.head_dim,
             max_position=max_position,
             rope_parameters=rope_parameters,
+            is_neox_style=is_neox_style,
         )
 
         self.attention_sink_bias = (
@@ -304,6 +306,7 @@ class DFlashQwen3DecoderLayer(nn.Module):
             add_swa_attention_sink_bias=add_swa_attention_sink_bias,
             sliding_window=sliding_window,
             causal=causal,
+            is_neox_style=getattr(config, "is_neox_style", True),
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,
