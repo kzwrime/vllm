@@ -716,7 +716,6 @@ def sparse_attn_indexer(
     return
 
 
-
 def sparse_attn_indexer_fake(
     hidden_states: torch.Tensor,
     k_cache_prefix: LayerNameType,

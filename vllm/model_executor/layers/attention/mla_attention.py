@@ -1396,6 +1396,7 @@ def unified_mla_attention_with_output(
     quant_col_major: bool | None = None,
     quant_tma_aligned: bool | None = None,
     q_dcp_replicated: torch.Tensor | None = None,
+    q_is_projected: bool = False,
 ) -> None:
     # kv_cache_dummy_dep is not used but accepting it creates a data dependency
     # that ensures torch.compile preserves ordering between KV cache update and
@@ -1417,6 +1418,7 @@ def unified_mla_attention_with_output(
         quant_col_major=quant_col_major,
         quant_tma_aligned=quant_tma_aligned,
         q_dcp_replicated=q_dcp_replicated,
+        q_is_projected=q_is_projected,
     )
 
 
@@ -1434,6 +1436,7 @@ def unified_mla_attention_with_output_fake(
     quant_col_major: bool | None = None,
     quant_tma_aligned: bool | None = None,
     q_dcp_replicated: torch.Tensor | None = None,
+    q_is_projected: bool = False,
 ) -> None:
     return
 

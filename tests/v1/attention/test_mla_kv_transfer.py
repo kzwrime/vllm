@@ -16,11 +16,19 @@ from vllm.model_executor.layers.attention import (
 
 
 @pytest.mark.parametrize("with_connector", [False, True])
-def test_direct_mla_uses_transferred_cache(monkeypatch, with_connector):
+@pytest.mark.parametrize("kv_cache_updated", [False, True])
+@pytest.mark.parametrize("q_is_projected", [False, True])
+def test_direct_mla_uses_transferred_cache(
+    monkeypatch, with_connector, kv_cache_updated, q_is_projected
+):
     cache = torch.zeros(2)
     events = []
+    updates = []
+    if kv_cache_updated:
+        cache[1] = 3
 
     def update(*args):
+        updates.append(True)
         cache[1] = 3
 
     def restore(name):
@@ -28,6 +36,7 @@ def test_direct_mla_uses_transferred_cache(monkeypatch, with_connector):
         cache[0] = 9
 
     def forward(*args, output, **kwargs):
+        assert kwargs["q_is_projected"] == q_is_projected
         events.append("attention")
         output.fill_(cache.sum())
 
@@ -64,7 +73,16 @@ def test_direct_mla_uses_transferred_cache(monkeypatch, with_connector):
     connector.save_kv_layer.side_effect = save
     monkeypatch.setattr(kv_transfer_utils, "get_kv_transfer_group", lambda: connector)
     q = torch.zeros(1)
-    result = mla_attention.MLAAttention.forward(layer, q, q, q, output_shape=q.shape)
+    result = mla_attention.MLAAttention.forward(
+        layer,
+        q,
+        q,
+        q,
+        output_shape=q.shape,
+        kv_cache_updated=kv_cache_updated,
+        q_is_projected=q_is_projected,
+    )
+    assert len(updates) == (0 if kv_cache_updated else 1)
     assert result.item() == (12 if with_connector else 3)
     assert events == (
         ["load", "attention", "save"] if with_connector else ["attention"]
