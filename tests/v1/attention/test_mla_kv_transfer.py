@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""直接调用 MLA 时，注意力必须使用 connector 恢复的历史缓存。"""
 
 from types import SimpleNamespace
 from unittest.mock import Mock

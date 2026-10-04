@@ -367,7 +367,6 @@ def sparse_attn_indexer(
         return
     attn_metadata_narrowed = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata_narrowed, DeepseekV32IndexerMetadata)
-    # 索引 K 也是跨 P/D 恢复所需的历史状态；保留原始布局供 connector 使用。
     kv_cache_for_transfer = kv_cache
     connector = None
     if has_kv_transfer_group() and is_v1_kv_transfer_group():
@@ -838,8 +837,6 @@ class SparseAttnIndexer(CustomOp):
                 raise NotImplementedError(
                     "The accelerated OOT sparse indexer supports FP8 Q/cache only"
                 )
-            # PCP 会在此算子前收集 Prefill 的 indexer K 并展开 slot mapping，
-            # 加速内核接收展开后的布局；DCP 仍会改变本地序列布局，暂不支持。
             if self.dcp_world_size != 1:
                 raise NotImplementedError(
                     "The accelerated OOT sparse indexer requires PCP=1 and DCP=1"

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""用小型 CPU 缓存验证完整发布、跨槽位恢复及能力限制，无需加载模型。"""
 
 from types import SimpleNamespace as NS
 
@@ -48,7 +47,6 @@ def metadata(store, block):
 
 
 def cache(dtype):
-    # 页间有 padding，reshape 可能产生副本。
     result = torch.empty_strided((4, 4, 3), (16, 3, 1), dtype=dtype)
     result.copy_(torch.arange(48).reshape(4, 4, 3))
     return result
@@ -73,7 +71,6 @@ def test_complete_cache_restored_to_other_slots(tmp_path, monkeypatch):
         assert torch.equal(target[name][2], source[name][1])
         assert not target[name][:2].any()
         assert not target[name][3].any()
-    # 文件丢失时，不能仅凭 complete.json 报告命中。
     next(tmp_path.glob("*/indexer.safetensors")).unlink()
     assert not reader._found_match_for_prompt(list(range(7)), [])
 
@@ -93,7 +90,7 @@ def test_rejects_partial_prefill_before_publishing(tmp_path, monkeypatch):
         ],
         num_scheduled_tokens={"r": 3},
     )
-    with pytest.raises(ValueError, match="分块 prefill"):
+    with pytest.raises(ValueError, match="chunked prefill"):
         connector.build_connector_meta(schedule)
     assert not list(tmp_path.iterdir())
 
@@ -108,7 +105,7 @@ def test_rejects_incompatible_cache_format(tmp_path, monkeypatch):
     caches["mla"] = caches["mla"].float()
     connector.register_kv_caches(caches)
     connector.bind_connector_metadata(metadata(False, 2))
-    with pytest.raises(ValueError, match="缓存格式不匹配"):
+    with pytest.raises(ValueError, match="Cache format mismatch"):
         connector.start_load_kv(NS())
 
 

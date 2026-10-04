@@ -773,7 +773,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     self._k_scale,
                 )
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-            # 直接调用也复用逐层 KV 传输 hook，避免绕过 connector 的等待和保存。
             unified_mla_attention_with_output(
                 q,
                 kv_c_normed,

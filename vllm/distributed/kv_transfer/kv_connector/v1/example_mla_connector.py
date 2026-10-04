@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MLA 和稀疏 indexer 的同步文件传输示例，不适用于生产服务。
+"""Synchronous file transfer example for MLA and indexer caches.
 
-缓存布局为 [pages, block_size, entry_width]，允许页间 padding。
-仅支持 TP=PP=DP=DCP=1、非 EP、单请求和单次完成 prefill；PCP
-各 rank 必须持有完整 token 缓存副本。共享目录须专用于同一模型权重、
-缓存格式及一个写入引擎，不支持多个写入引擎竞争或运行中删除缓存。
+Requires replicated PCP caches and a dedicated directory for one writer,
+model and cache format. Cache pages may have padding. Do not delete published
+files while readers are active. Not intended for production serving.
 """
 
 import json
@@ -42,8 +41,8 @@ class ExampleMLAConnector(ExampleConnector):
             or len(kv_cache_config.kv_cache_groups) != 1
         ):
             raise ValueError(
-                "ExampleMLAConnector 仅支持 TP=PP=DP=DCP=1、非 EP、"
-                "单请求、普通缓存和单缓存组"
+                "ExampleMLAConnector requires TP=PP=DP=DCP=1, no EP, "
+                "one request, regular KV cache and one cache group"
             )
         self._layers = set(kv_cache_config.kv_cache_groups[0].layer_names)
         self._caches: dict[str, torch.Tensor] = {}
@@ -56,10 +55,10 @@ class ExampleMLAConnector(ExampleConnector):
 
     def register_kv_caches(self, kv_caches):
         if set(kv_caches) != self._layers:
-            raise ValueError("注册缓存与完整层清单不一致")
+            raise ValueError("Registered caches must match the complete layer set")
         for name, cache in kv_caches.items():
             if cache.ndim != 3 or cache.shape[1] != self._block_size:
-                raise ValueError(f"不支持的缓存布局：{name}: {cache.shape}")
+                raise ValueError(f"Unsupported cache layout: {name}: {cache.shape}")
         self._caches = kv_caches
 
     def bind_connector_metadata(self, connector_metadata):
@@ -99,16 +98,16 @@ class ExampleMLAConnector(ExampleConnector):
         return max(0, count), async_load
 
     def build_connector_meta(self, scheduler_output):
-        # 原 ExampleConnector 在首个 chunk 就构造全 prompt 的保存元数据。
-        # 在生成这些元数据前拒绝部分 prefill，防止落盘未初始化的槽位。
         for request in scheduler_output.scheduled_new_reqs:
             scheduled = scheduler_output.num_scheduled_tokens[request.req_id]
             if request.num_computed_tokens + scheduled < len(
                 request.prompt_token_ids or []
             ):
-                raise ValueError("ExampleMLAConnector 暂不支持分块 prefill")
+                raise ValueError("ExampleMLAConnector does not support chunked prefill")
         if scheduler_output.scheduled_cached_reqs.resumed_req_ids:
-            raise ValueError("ExampleMLAConnector 暂不支持抢占后恢复")
+            raise ValueError(
+                "ExampleMLAConnector does not support resuming preempted requests"
+            )
         meta = super().build_connector_meta(scheduler_output)
         if self._kv_transfer_config.kv_role == "kv_consumer":
             meta.requests = [r for r in meta.requests if not r.is_store]
@@ -118,7 +117,7 @@ class ExampleMLAConnector(ExampleConnector):
         slots = request.slot_mapping.cpu().long()
         n = len(request.token_ids)
         if n == 0 or len(slots) != n or n % self._block_size:
-            raise ValueError("缓存传输必须包含完整且非空的 block")
+            raise ValueError("Cache transfer requires complete, nonempty blocks")
         rows = slots.reshape(-1, self._block_size)
         starts = rows[:, 0]
         if (
@@ -127,14 +126,16 @@ class ExampleMLAConnector(ExampleConnector):
             or not torch.equal(rows, starts[:, None] + torch.arange(self._block_size))
             or torch.any(starts // self._block_size >= cache.shape[0])
         ):
-            raise ValueError("缓存槽位未对齐或越界")
+            raise ValueError("Cache slots are misaligned or out of bounds")
         return (starts // self._block_size).tolist()
 
     def save_kv_layer(self, layer_name, kv_layer, attn_metadata, **kwargs):
         if not self._writer:
             return
         if layer_name not in self._caches or kv_layer is not self._caches[layer_name]:
-            raise ValueError(f"保存必须使用注册的原始缓存：{layer_name}")
+            raise ValueError(
+                f"Saving requires the registered cache tensor: {layer_name}"
+            )
         for request in self._get_connector_metadata().requests:
             if not request.is_store or len(request.token_ids) == 0:
                 continue
@@ -143,7 +144,6 @@ class ExampleMLAConnector(ExampleConnector):
                     layer_name, request.token_ids, request.mm_hashes
                 )
             )
-            # 已发布的同一前缀保持不可变，读者不会看到混合的两轮保存。
             if (filename.parent / "complete.json").exists():
                 continue
             blocks = self._blocks(request, kv_layer)
@@ -164,7 +164,7 @@ class ExampleMLAConnector(ExampleConnector):
             if request.is_store:
                 continue
             if set(self._caches) != self._layers:
-                raise ValueError("加载前必须注册完整缓存")
+                raise ValueError("All caches must be registered before loading")
             for name, cache in self._caches.items():
                 folder = Path(
                     self._generate_foldername_debug(
@@ -173,7 +173,7 @@ class ExampleMLAConnector(ExampleConnector):
                 )
                 manifest = json.loads((folder / "complete.json").read_text())
                 if manifest != self._manifest(len(request.token_ids)):
-                    raise ValueError("缓存清单与当前引擎不兼容")
+                    raise ValueError("Cache manifest is incompatible with this engine")
                 cpu = safetensors.torch.load_file(
                     str(folder / f"{name}.safetensors"), device="cpu"
                 )["kv_cache"]
@@ -181,9 +181,9 @@ class ExampleMLAConnector(ExampleConnector):
                     cpu.shape != (len(request.token_ids), cache.shape[2])
                     or cpu.dtype != cache.dtype
                 ):
-                    raise ValueError(f"缓存格式不匹配：{name}")
+                    raise ValueError(f"Cache format mismatch: {name}")
                 blocks = self._blocks(request, cache)
-                # 逐页写回保留 padding/stride，避免 reshape 复制后丢失写入。
+                # Copy per page: reshape may copy a padded cache.
                 for i, block in enumerate(blocks):
                     cache[block].copy_(
                         cpu[i * self._block_size : (i + 1) * self._block_size].to(
