@@ -10,6 +10,11 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
+from vllm.distributed.kv_transfer import (
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+    is_v1_kv_transfer_group,
+)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
@@ -362,6 +367,14 @@ def sparse_attn_indexer(
         return
     attn_metadata_narrowed = attn_metadata[k_cache_prefix]
     assert isinstance(attn_metadata_narrowed, DeepseekV32IndexerMetadata)
+    # 索引 K 也是跨 P/D 恢复所需的历史状态；保留原始布局供 connector 使用。
+    kv_cache_for_transfer = kv_cache
+    connector = None
+    if has_kv_transfer_group() and is_v1_kv_transfer_group():
+        candidate = get_kv_transfer_group()
+        if candidate.has_connector_metadata():
+            connector = candidate
+            connector.wait_for_layer_load(k_cache_prefix)
     slot_mapping = attn_metadata_narrowed.slot_mapping
     has_decode = attn_metadata_narrowed.num_decodes > 0
     has_prefill = attn_metadata_narrowed.num_prefills > 0
@@ -696,7 +709,12 @@ def sparse_attn_indexer(
                 topk_indices
             )
 
+    if connector is not None:
+        connector.save_kv_layer(
+            k_cache_prefix, kv_cache_for_transfer, attn_metadata_narrowed
+        )
     return
+
 
 
 def sparse_attn_indexer_fake(
