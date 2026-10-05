@@ -14,16 +14,88 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    MambaManager,
     RSWAManager,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
+    MambaSpec,
     RSWASpec,
     SlidingWindowSpec,
 )
 
 pytestmark = pytest.mark.cpu_test
+
+
+def test_mamba_retirement_crosses_null_gaps_and_resets_on_free():
+    spec = MambaSpec(
+        block_size=4,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+    pool = BlockPool(num_gpu_blocks=8, enable_caching=False, hash_block_size=4)
+    manager = MambaManager(
+        spec,
+        block_pool=pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=4,
+    )
+    old, committed, in_flight = pool.get_new_blocks(3)
+    manager.req_to_blocks["r"] = [old, pool.null_block, committed, in_flight]
+    for _ in range(2):
+        manager.remove_skipped_blocks("r", processed_computed_tokens=12)
+        assert manager.req_to_blocks["r"] == [
+            pool.null_block,
+            pool.null_block,
+            committed,
+            in_flight,
+        ]
+        assert old.ref_cnt == 0
+        assert committed.ref_cnt == in_flight.ref_cnt == 1
+        assert pool.get_num_free_blocks() == 5
+    manager.free("r")
+    manager.req_to_blocks["r"] = pool.get_new_blocks(2)
+    manager.remove_skipped_blocks("r", processed_computed_tokens=5)
+    assert manager.req_to_blocks["r"][0].is_null
+    assert manager.req_to_blocks["r"][1].ref_cnt == 1
+
+
+@pytest.mark.parametrize("in_flight_chunks", [0, 1, 2])
+def test_mamba_dflash_chunked_prefill_retains_bounded_states(in_flight_chunks):
+    """Long agent prompts must not retain one set of states per prefill chunk."""
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+        num_speculative_blocks=5,
+    )
+    pool = BlockPool(num_gpu_blocks=1000, enable_caching=True, hash_block_size=16)
+    manager = MambaManager(
+        spec,
+        block_pool=pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=816,
+    )
+    initial_free = pool.get_num_free_blocks()
+    peak_held = 0
+    chunk = 176  # 256 batched tokens minus 16 requests * 5 draft slots.
+    for target in range(chunk, 21000, chunk):
+        computed = target - chunk
+        committed = max(0, computed - in_flight_chunks * chunk)
+        manager.remove_skipped_blocks("r", committed)
+        manager.get_num_blocks_to_allocate(
+            "r", target + 5, [], computed, computed, target
+        )
+        manager.allocate_new_blocks("r", target + 5, target)
+        peak_held = max(peak_held, initial_free - pool.get_num_free_blocks())
+    assert peak_held == 7 + in_flight_chunks
+    manager.free("r")
+    assert pool.get_num_free_blocks() == initial_free
 
 
 def get_sliding_window_manager(sliding_window_spec, block_pool, enable_caching=True):
