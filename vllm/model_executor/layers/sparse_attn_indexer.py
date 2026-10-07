@@ -821,9 +821,9 @@ class SparseAttnIndexer(CustomOp):
                 raise NotImplementedError(
                     "The accelerated OOT sparse indexer supports FP8 Q/cache only"
                 )
-            if self.use_pcp or self.dcp_world_size != 1:
+            if self.dcp_world_size != 1:
                 raise NotImplementedError(
-                    "The accelerated OOT sparse indexer requires PCP=1 and DCP=1"
+                    "The accelerated OOT sparse indexer requires DCP=1"
                 )
             if (
                 q_quant.ndim != 3
