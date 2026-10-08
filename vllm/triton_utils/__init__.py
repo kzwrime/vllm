@@ -12,8 +12,11 @@ if TYPE_CHECKING or HAS_TRITON:
     import triton
     import triton.language as tl
     import triton.language.extra.libdevice as tldevice
-    from triton.experimental import gluon
-    from triton.experimental.gluon import language as gl
+
+    # from triton.experimental import gluon
+    # from triton.experimental.gluon import language as gl
+    gluon = TritonLanguagePlaceholder()
+    gl = TritonLanguagePlaceholder()
     from triton.language.core import _aggregate as aggregate  # noqa: E501
 else:
     triton = TritonPlaceholder()
