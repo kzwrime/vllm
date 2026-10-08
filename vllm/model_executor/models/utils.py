@@ -1063,6 +1063,23 @@ def fast_topk(
         return torch.topk(values, topk, dim=dim)
 
 
+def sequence_parallel_pad(x: torch.Tensor, tp_size: int) -> torch.Tensor:
+    """Pad token rows for TP collectives, preserving already aligned inputs."""
+    pad_len = (-x.shape[0]) % tp_size
+    if pad_len == 0:
+        return x
+    if (
+        x.device.type in ("mcpu", "privateuseone")
+        and x.ndim == 2
+        and x.is_contiguous()
+        and x.dtype in (torch.bfloat16, torch.float16, torch.float32)
+    ):
+        from torch_xcpu.ops import constant_pad_2d
+
+        return constant_pad_2d(x, (0, 0, 0, pad_len))
+    return nn.functional.pad(x, (0, 0, 0, pad_len))
+
+
 # Chunk x along the num_tokens axis for sequence parallelism
 # NOTE: This is wrapped in a torch custom op to work around the following issue:
 # The output tensor can have a sequence length 0 at small input sequence lengths
@@ -1076,13 +1093,7 @@ def sequence_parallel_chunk_impl(x: torch.Tensor) -> torch.Tensor:
     tp_rank = get_tensor_model_parallel_rank()
 
     # all_gather needs the sequence length to be divisible by tp_size
-    seq_len = x.size(0)
-    remainder = seq_len % tp_size
-    if remainder != 0:
-        pad_len = tp_size - remainder
-        y = nn.functional.pad(x, (0, 0, 0, pad_len))
-    else:
-        y = x
+    y = sequence_parallel_pad(x, tp_size)
 
     chunk = y.shape[0] // tp_size
     start = tp_rank * chunk

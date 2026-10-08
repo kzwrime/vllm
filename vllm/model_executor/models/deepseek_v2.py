@@ -91,6 +91,7 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     extract_layer_index,
     sequence_parallel_chunk,
+    sequence_parallel_pad,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -1359,10 +1360,7 @@ class DeepseekV2DecoderLayer(nn.Module):
 
         if self.use_sequence_parallel_moe:
             tp_world_size = get_tensor_model_parallel_world_size()
-            # small trick using minus, eg. -17 % 8 = 7
-            sp_pad = (-hidden_states.shape[0]) % tp_world_size
-            # pad if not divisible by world size
-            hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, sp_pad))
+            hidden_states = sequence_parallel_pad(hidden_states, tp_world_size)
             hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
             if not input_is_sequence_parallel:
                 residual = sequence_parallel_chunk(residual)
