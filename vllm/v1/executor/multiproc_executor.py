@@ -5,6 +5,7 @@ import os
 import pickle
 import queue
 import signal
+import socket
 import threading
 import time
 import traceback
@@ -169,22 +170,66 @@ class MultiprocExecutor(Executor):
             )
             scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
         # Create workers
+        global_start_rank = (
+            self.local_world_size * self.parallel_config.node_rank_within_dp
+        )
+        success = False
+        try:
+            # Workers must be created before wait_for_ready to avoid
+            # deadlock, since worker.init_device() does a device sync.
+            self.workers = self._create_workers(
+                global_start_rank, distributed_init_method, scheduler_output_handle
+            )
+
+            # Workers have picked up their own thread counts; the executor
+            # only schedules and must not compete for their CPU threads.
+            set_torch_threads_for_runtime()
+
+            # Start background thread to monitor worker health if not in headless mode.
+            if self.monitor_workers:
+                self.start_worker_monitor()
+
+            self.response_mqs = self._setup_response_mqs()
+
+            # Ensure message queues are ready. Will deadlock if re-ordered
+            # Must be kept consistent with the WorkerProc.
+
+            # Wait for all input mqs to be ready.
+            if self.rpc_broadcast_mq is not None:
+                self.rpc_broadcast_mq.wait_until_ready()
+            # Wait for all remote response mqs to be ready.
+            for response_mq in self.response_mqs:
+                response_mq.wait_until_ready()
+
+            self.futures_queue = deque[FutureWrapper]()
+
+            self._post_init_executor()
+
+            success = True
+        finally:
+            if not success:
+                self.shutdown()
+
+        self.output_rank = self._get_output_rank()
+
+    def _create_workers(
+        self,
+        global_start_rank: int,
+        distributed_init_method: str,
+        scheduler_output_handle: Handle | None,
+    ) -> list["WorkerProcHandle"]:
+        """Create worker processes and wait for them to be ready."""
         context = get_mp_context()
         shared_worker_lock = context.Lock()
         unready_workers: list[UnreadyWorkerProcHandle] = []
         success = False
         try:
-            global_start_rank = (
-                self.local_world_size * self.parallel_config.node_rank_within_dp
-            )
             # When using fork, keep track of socket file descriptors that are
             # inherited by the worker, so that we can close them in subsequent
             # workers
             inherited_fds: list[int] | None = (
                 [] if context.get_start_method() == "fork" else None
             )
-
-            # For CPU backend only, to setup OpenMP threads affinity
             cpu_omp_manager = OMPProcessManager(self.vllm_config)
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
@@ -206,64 +251,19 @@ class MultiprocExecutor(Executor):
                 if inherited_fds is not None:
                     inherited_fds.append(unready_worker_handle.death_writer.fileno())
                     inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
-
-            # Workers must be created before wait_for_ready to avoid
-            # deadlock, since worker.init_device() does a device sync.
-
-            # Wait for all local workers to be ready.
-            self.workers = WorkerProc.wait_for_ready(unready_workers)
-
-            # The workers have inherited their thread count (see
-            # set_multiprocessing_worker_envs); this process only schedules, so
-            # it gets no benefit from torch intra-op parallelism, just CPU
-            # contention with them.
-            set_torch_threads_for_runtime()
-
-            # Start background thread to monitor worker health if not in headless mode.
-            if self.monitor_workers:
-                self.start_worker_monitor()
-
-            self.response_mqs = []
-            # Only leader node have remote response mqs
-            if self.parallel_config.node_rank_within_dp == 0:
-                for rank in range(self.world_size):
-                    if rank < self.local_world_size:
-                        local_message_queue = self.workers[rank].worker_response_mq
-                        assert local_message_queue is not None
-                        self.response_mqs.append(local_message_queue)
-                    else:
-                        remote_message_queue = self.workers[0].peer_worker_response_mqs[
-                            rank
-                        ]
-                        assert remote_message_queue is not None
-                        self.response_mqs.append(remote_message_queue)
-
-            # Ensure message queues are ready. Will deadlock if re-ordered
-            # Must be kept consistent with the WorkerProc.
-
-            # Wait for all input mqs to be ready.
-            if self.rpc_broadcast_mq is not None:
-                self.rpc_broadcast_mq.wait_until_ready()
-            # Wait for all remote response mqs to be ready.
-            for response_mq in self.response_mqs:
-                response_mq.wait_until_ready()
-
-            self.futures_queue = deque[FutureWrapper]()
-
-            self._post_init_executor()
-
+            workers = WorkerProc.wait_for_ready(unready_workers)
             success = True
+            return workers
         finally:
             if not success:
-                # Clean up the worker procs if there was a failure.
-                # Close death_writers first to signal workers to exit
+                # Close death_writers to signal workers to exit
                 for uw in unready_workers:
                     if uw.death_writer is not None:
                         uw.death_writer.close()
                         uw.death_writer = None
-                self._ensure_worker_termination([uw.proc for uw in unready_workers])
-
-        self.output_rank = self._get_output_rank()
+                self._ensure_worker_termination(
+                    [uw.proc for uw in unready_workers if uw.proc is not None]
+                )
 
     def get_response_mqs(self, unique_reply_rank: int = -1) -> list[MessageQueue]:
         assert unique_reply_rank >= -1 and unique_reply_rank < self.world_size, (
@@ -274,7 +274,9 @@ class MultiprocExecutor(Executor):
         ranks = (
             [unique_reply_rank] if unique_reply_rank != -1 else range(self.world_size)
         )
-        return [self.workers[rank].worker_response_mq for rank in ranks]
+        response_mqs = [self.workers[rank].worker_response_mq for rank in ranks]
+        assert all(mq is not None for mq in response_mqs)
+        return cast(list[MessageQueue], response_mqs)
 
     def _get_parallel_sizes(self) -> tuple[int, int, int]:
         self.world_size = self.parallel_config.world_size
@@ -292,6 +294,23 @@ class MultiprocExecutor(Executor):
     def _post_init_executor(self) -> None:
         pass
 
+    def _setup_response_mqs(self) -> list[MessageQueue]:
+        response_mqs: list[MessageQueue] = []
+        # Only leader node has remote response mqs.
+        if self.parallel_config.node_rank_within_dp == 0:
+            for rank in range(self.world_size):
+                if rank < self.local_world_size:
+                    local_message_queue = self.workers[rank].worker_response_mq
+                    assert local_message_queue is not None
+                    response_mqs.append(local_message_queue)
+                else:
+                    remote_message_queue = self.workers[0].peer_worker_response_mqs[
+                        rank
+                    ]
+                    assert remote_message_queue is not None
+                    response_mqs.append(remote_message_queue)
+        return response_mqs
+
     def _is_driver_worker(self, rank: int) -> bool:
         return rank % self.parallel_config.tensor_parallel_size == 0
 
@@ -303,14 +322,21 @@ class MultiprocExecutor(Executor):
         # logs an error, shuts down the executor and invokes the failure
         # callback to inform the engine.
         def monitor_workers():
-            sentinels = [h.proc.sentinel for h in workers]
+            sentinels = [h.proc.sentinel for h in workers if h.proc is not None]
+            if not sentinels:
+                # All workers are RPC workers (no local process to monitor)
+                return
             died = multiprocessing.connection.wait(sentinels)
             _self = self_ref()
             if not _self or getattr(_self, "shutting_down", False):
                 logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
                 return
             _self.is_failed = True
-            proc = next(h.proc for h in workers if h.proc.sentinel == died[0])
+            proc = next(
+                h.proc
+                for h in workers
+                if h.proc is not None and h.proc.sentinel == died[0]
+            )
             logger.error(
                 "Worker proc %s died unexpectedly (exit code: %s), "
                 "shutting down executor.",
@@ -518,7 +544,9 @@ class MultiprocExecutor(Executor):
                     if w.death_writer is not None:
                         w.death_writer.close()
                         w.death_writer = None
-                self._ensure_worker_termination([w.proc for w in workers])
+                self._ensure_worker_termination(
+                    [w.proc for w in workers if w.proc is not None]
+                )
 
                 for w in workers:
                     # Shutdown response queues
@@ -565,15 +593,15 @@ class MultiprocExecutor(Executor):
 class UnreadyWorkerProcHandle:
     """WorkerProcess handle before READY."""
 
-    proc: BaseProcess
+    proc: BaseProcess | None  # None for RPC workers
     rank: int
-    ready_pipe: Connection
+    ready_pipe: Connection | socket.socket  # Can be socket for RPC
     death_writer: Connection | None = None
 
 
 @dataclass
 class WorkerProcHandle:
-    proc: BaseProcess
+    proc: BaseProcess | None  # None for RPC workers
     rank: int
     # The worker process writes to this MQ in single-node mode
     worker_response_mq: MessageQueue | None
@@ -603,6 +631,7 @@ class WorkerProc:
     """Wrapper that runs one Worker in a separate process."""
 
     READY_STR = "READY"
+    _is_external_rpc_worker: bool = False
     rpc_broadcast_mq: MessageQueue | None
     worker_response_mq: MessageQueue | None
 
@@ -1041,6 +1070,8 @@ class WorkerProc:
     ) -> None:
         """Execute one RPC in a separate frame from the dequeue loop."""
         method, args, kwargs, output_rank = rpc_request
+        if method == "shutdown" and self._is_external_rpc_worker:
+            raise SystemExit()
         try:
             if isinstance(method, str):
                 func = getattr(self.worker, method)

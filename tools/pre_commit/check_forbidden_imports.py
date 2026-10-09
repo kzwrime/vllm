@@ -53,6 +53,7 @@ CHECK_IMPORTS = {
             "vllm/compilation/piecewise_backend.py",
             "vllm/distributed/utils.py",
             "vllm/distributed/parallel_state.py",
+            "vllm/v1/executor/socket_utils.py",
             "vllm/distributed/device_communicators/all_reduce_utils.py",
             "vllm/distributed/device_communicators/shm_broadcast.py",
             "vllm/distributed/device_communicators/shm_object_storage.py",
