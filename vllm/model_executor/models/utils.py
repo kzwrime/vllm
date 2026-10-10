@@ -1064,9 +1064,11 @@ def fast_topk(
 
 
 def sequence_parallel_pad(x: torch.Tensor, tp_size: int) -> torch.Tensor:
-    """Pad token rows for TP collectives, preserving already aligned inputs."""
+    """Pad token rows for TP collectives, preserving aligned eager inputs."""
     pad_len = (-x.shape[0]) % tp_size
-    if pad_len == 0:
+    # vLLM reuses compiled graphs without shape guards. Keep dynamic padding
+    # in the graph even when the tracing input is already aligned.
+    if not torch.compiler.is_compiling() and pad_len == 0:
         return x
     if (
         x.device.type in ("mcpu", "privateuseone")
