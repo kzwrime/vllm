@@ -188,7 +188,8 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
             time.perf_counter() - jit_warmup_start,
         )
 
-    qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
+    if current_platform.device_name != "mcpu":
+        qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
     qwen_vl_triton_warmup(worker.model_runner)
     mamba_triton_warmup(worker.model_runner)
 

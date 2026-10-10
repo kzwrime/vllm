@@ -531,6 +531,10 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         elif current_platform.is_xpu():
             self.gdn_decode_kernel = "XPU"
 
+        if current_platform.device_name == "mcpu":
+            # XCPU replacements implement the standard per-op path, not CUDA MTP.
+            self.gdn_decode_kernel = "triton"
+
         self.enable_fused_gdn_spec_decode = (
             self.gdn_decode_kernel == "cuda" and self.speculative_config is not None
         )
