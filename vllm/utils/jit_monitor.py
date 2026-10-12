@@ -239,6 +239,11 @@ def _setup_triton_jit_hook() -> None:
     """Register a jit_post_compile_hook that warns on compilation."""
     if not HAS_TRITON:
         return
+    import triton
+
+    # XCPU dispatches registered native kernels and has no Triton JIT compiler.
+    if getattr(triton, "__xcpu_fake_triton__", False):
+        return
     from triton import knobs
     from triton.runtime import jit as _triton_jit
 
