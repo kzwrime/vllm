@@ -3,7 +3,7 @@
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
 import os
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 from einops import rearrange
@@ -810,13 +810,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         return mixed_qkv_out, z_out, b_out, a_out
 
     def rearrange_mixed_qkv(self, mixed_qkv):
-        """Split packed qkv into contiguous (1, seq, heads, dim) tensors.
+        """Split packed qkv into (1, seq, heads, dim) tensors.
 
         The original code used ``rearrange(x, "l (h d) -> 1 l h d", d=...)``
         followed by ``.contiguous()`` on each tensor.  This version flattens
         all three splits into a single buffer via ``torch.cat`` so that
         torch.compile emits one Triton copy kernel instead of three separate
         contiguous() calls.
+
+        XCPU recurrent kernels accept token-strided views, so they do not need
+        this materialization.
         """
         if mixed_qkv is None:
             return None, None, None
@@ -827,6 +830,13 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         v_dim = self.value_dim // self.tp_size
 
         query, key, value = torch.split(mixed_qkv, [q_dim, k_dim, v_dim], dim=-1)
+
+        if current_platform.device_name == "mcpu":
+            return (
+                query.view(1, seq_len, -1, self.head_k_dim),
+                key.view(1, seq_len, -1, self.head_k_dim),
+                value.view(1, seq_len, -1, self.head_v_dim),
+            )
 
         fused = torch.cat(
             [query.reshape(-1), key.reshape(-1), value.reshape(-1)], dim=0
@@ -957,9 +967,16 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
-        # Note: we should not use torch.empty here like other attention backends,
-        # see discussions in https://github.com/vllm-project/vllm/pull/28182
-        core_attn_out = torch.zeros(
+        if current_platform.device_name == "mcpu":
+            # XCPU kernels accept strided gates; the core initializes dummy
+            # output and padding before returning to the output projection.
+            allocate_output = torch.empty
+        else:
+            # Keep zero initialization on other backends; see PR #28182.
+            allocate_output = torch.zeros
+            b = b.contiguous()
+            a = a.contiguous()
+        core_attn_out = allocate_output(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
@@ -967,8 +984,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
 
         torch.ops.vllm.qwen_gdn_attention_core(
             mixed_qkv,
-            b.contiguous(),
-            a.contiguous(),
+            b,
+            a,
             core_attn_out,
             layer_name=_encode_layer_name(self.prefix),
         )
@@ -1275,9 +1292,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             attn_metadata = attn_metadata_raw.get(self.prefix)
         if attn_metadata is None:
             self._warmup_prefill_kernels(mixed_qkv, 0)
+            if current_platform.device_name == "mcpu":
+                core_attn_out.zero_()
             return
 
         assert isinstance(attn_metadata, GDNAttentionMetadata)
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        if (
+            current_platform.device_name == "mcpu"
+            and num_actual_tokens < core_attn_out.size(0)
+        ):
+            core_attn_out[num_actual_tokens:].zero_()
 
         if (
             self.enable_packed_recurrent_decode
@@ -1310,7 +1335,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             else self_kv_cache[0].transpose(-1, -2)
         )
         ssm_state = self_kv_cache[1]
-        num_actual_tokens = attn_metadata.num_actual_tokens
         num_accepted_tokens = attn_metadata.num_accepted_tokens
 
         mixed_qkv = mixed_qkv[:num_actual_tokens]
@@ -1452,7 +1476,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # 2. Recurrent attention
 
         # 2.1: Process the multi-query part
+        direct_spec_output = (
+            current_platform.device_name == "mcpu"
+            and spec_sequence_masks is not None
+            and attn_metadata.num_prefills == 0
+            and attn_metadata.num_decodes == 0
+        )
         if spec_sequence_masks is not None:
+            # The XCPU replacement supports out; upstream FLA does not.
+            spec_kwargs: dict[str, Any] = {}
+            if direct_spec_output:
+                spec_kwargs["out"] = core_attn_out[:num_actual_tokens].unsqueeze(0)
             core_attn_out_spec, last_recurrent_state = (
                 fused_sigmoid_gating_delta_rule_update(
                     A_log=self.A_log,
@@ -1471,6 +1505,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     ssm_state_indices=spec_state_indices_tensor,
                     num_accepted_tokens=num_accepted_tokens,
                     use_qk_l2norm_in_kernel=True,
+                    **spec_kwargs,
                 )
             )
         else:
@@ -1510,8 +1545,18 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             prefill_has_initial_state = attn_metadata.prefill_has_initial_state
             assert prefill_state_indices is not None
             assert prefill_has_initial_state is not None
-            initial_state = ssm_state[prefill_state_indices]
-            initial_state[~prefill_has_initial_state, ...] = 0
+            use_state_pool = current_platform.device_name == "mcpu"
+            state_kwargs: dict[str, Any]
+            if use_state_pool:
+                state_kwargs = dict(
+                    ssm_state=ssm_state,
+                    ssm_state_indices=prefill_state_indices,
+                    has_initial_state=prefill_has_initial_state,
+                )
+            else:
+                initial_state = ssm_state[prefill_state_indices]
+                initial_state[~prefill_has_initial_state, ...] = 0
+                state_kwargs = dict(initial_state=initial_state)
             (
                 core_attn_out_non_spec,
                 last_recurrent_state,
@@ -1521,15 +1566,17 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 v=value_non_spec,
                 g=g_non_spec,
                 beta=beta_non_spec,
-                initial_state=initial_state,
                 output_final_state=True,
                 cu_seqlens=attn_metadata.prefill_query_start_loc,
                 chunk_indices=attn_metadata.chunk_indices,
                 chunk_offsets=attn_metadata.chunk_offsets,
                 use_qk_l2norm_in_kernel=False,
+                **state_kwargs,
             )
-            # Init cache
-            ssm_state[prefill_state_indices] = last_recurrent_state.to(ssm_state.dtype)
+            if not use_state_pool:
+                ssm_state[prefill_state_indices] = last_recurrent_state.to(
+                    ssm_state.dtype
+                )
 
             if split_non_spec:
                 # Stitch the peeled decode outputs in front of the prefill
@@ -1567,7 +1614,8 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                 0, non_spec_token_indx, core_attn_out_non_spec.squeeze(0)
             )
         elif spec_sequence_masks is not None:
-            core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
+            if not direct_spec_output:
+                core_attn_out[:num_actual_tokens] = core_attn_out_spec.squeeze(0)
         else:
             core_attn_out[:num_actual_tokens] = core_attn_out_non_spec.squeeze(0)
 

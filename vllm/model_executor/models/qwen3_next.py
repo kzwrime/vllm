@@ -17,6 +17,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.model_executor.layers.activation import SigmoidMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
@@ -305,6 +306,7 @@ class Qwen3NextAttention(nn.Module):
             config, "dual_chunk_attention_config", None
         )
         self.attn_output_gate = getattr(config, "attn_output_gate", True)
+        self.sigmoid_mul = SigmoidMul()
 
         self.qkv_proj = QKVParallelLinear(
             config.hidden_size,
@@ -392,8 +394,8 @@ class Qwen3NextAttention(nn.Module):
         """Return post-norm, post-RoPE (q, k, v) and the pre-sigmoid gate.
 
         Dispatches between the fused Triton kernel and the eager
-        split + QK-RMSNorm + RoPE path. ``gate`` is ``None`` when output
-        gating is disabled.
+        split + QK-RMSNorm + RoPE path. ``gate`` keeps its per-head layout
+        until the output multiply, or is ``None`` when gating is disabled.
         """
         if self.use_fused_qk_norm_rope_gate:
             q_gate, k, v = qkv.split(
@@ -422,6 +424,7 @@ class Qwen3NextAttention(nn.Module):
                     else None
                 ),
             )
+            gate = gate.unflatten(-1, (self.num_heads, self.head_dim))
             return q, k, v, gate
 
         if self.attn_output_gate:
@@ -429,17 +432,18 @@ class Qwen3NextAttention(nn.Module):
                 [self.q_size * 2, self.kv_size, self.kv_size], dim=-1
             )
             orig_shape = q_gate.shape[:-1]
-            q_gate = q_gate.view(*orig_shape, self.num_heads, -1)
-            q, gate = torch.chunk(q_gate, 2, dim=-1)
-            q = q.reshape(*orig_shape, -1)
-            gate = gate.reshape(*orig_shape, -1)
+            # Flattening these strided views before their consumers would
+            # materialize copies of q and gate.
+            q_gate = q_gate.view(*orig_shape, self.num_heads, 2 * self.head_dim)
+            q = q_gate[..., : self.head_dim]
+            gate = q_gate[..., self.head_dim :]
         else:
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            orig_shape = q.shape[:-1]
+            q = q.view(*orig_shape, self.num_heads, self.head_dim)
             gate = None
 
-        q = self.q_norm(q.view(-1, self.num_heads, self.head_dim)).view(
-            -1, self.num_heads * self.head_dim
-        )
+        q = self.q_norm(q).view(*orig_shape, self.num_heads * self.head_dim)
         k = self.k_norm(k.view(-1, self.num_kv_heads, self.head_dim)).view(
             -1, self.num_kv_heads * self.head_dim
         )
@@ -455,7 +459,9 @@ class Qwen3NextAttention(nn.Module):
         q, k, v, gate = self._project_qkv_gate(qkv, positions)
         attn_output = self.attn(q, k, v)
         if gate is not None:
-            attn_output = attn_output * torch.sigmoid(gate)
+            attn_output = attn_output.unflatten(-1, (self.num_heads, self.head_dim))
+            attn_output = self.sigmoid_mul(attn_output, gate)
+            attn_output = attn_output.flatten(-2)
         output, _ = self.o_proj(attn_output)
         return output
 
