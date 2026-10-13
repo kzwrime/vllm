@@ -1087,6 +1087,22 @@ def sequence_parallel_pad(x: torch.Tensor, tp_size: int) -> torch.Tensor:
 # The output tensor can have a sequence length 0 at small input sequence lengths
 # even though we explicitly pad to avoid this.
 def sequence_parallel_chunk(x: torch.Tensor) -> torch.Tensor:
+    if (
+        torch.compiler.is_compiling()
+        and x.device.type in ("mcpu", "privateuseone")
+        and x.ndim == 2
+        and x.is_contiguous()
+        and x.dtype in (torch.bfloat16, torch.float16, torch.float32)
+    ):
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        y = sequence_parallel_pad(x, tp_size)
+        chunk = cdiv(x.shape[0], tp_size)
+        # Explicit view sizes avoid slice/narrow clamping symbolic lengths to
+        # zero during tracing. Padding owns fresh storage even when aligned.
+        return y.as_strided(
+            (chunk, x.shape[1]), y.stride(), tp_rank * chunk * y.stride(0)
+        )
     return torch.ops.vllm.sequence_parallel_chunk_impl(x)
 
 
