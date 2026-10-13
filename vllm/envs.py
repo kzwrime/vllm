@@ -1408,8 +1408,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RANDOMIZE_DP_DUMMY_INPUTS": lambda: (
         os.environ.get("VLLM_RANDOMIZE_DP_DUMMY_INPUTS", "0") == "1"
     ),
-    # Let xcpu kernels skip non-essential token work during runtime DP dummy
-    # runs while still preserving synchronization collectives.
+    # Let xcpu kernels skip non-essential token work during runtime dummy
+    # batches (including AF-EP and speculative decoding), preserving collectives.
     "VLLM_XCPU_ENABLE_DUMMY_RUN_FAST_PATH": lambda: bool(
         int(os.getenv("VLLM_XCPU_ENABLE_DUMMY_RUN_FAST_PATH", "1"))
     ),

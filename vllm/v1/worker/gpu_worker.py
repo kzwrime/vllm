@@ -1148,8 +1148,25 @@ class Worker(WorkerBase):
             self.profiler.stop()
 
     def execute_dummy_batch(self) -> None:
+        # Only runtime synchronization batches may omit routed tokens. Keeping
+        # this outside _dummy_run preserves profiling/warmup and covers both
+        # target and draft forwards, regardless of DP size or speculative length.
+        enable_xcpu_moe_dummy_run = (
+            current_platform.device_name == "mcpu"
+            and envs.VLLM_XCPU_ENABLE_DUMMY_RUN_FAST_PATH
+            and self.parallel_config.is_moe_model is not False
+        )
+        if enable_xcpu_moe_dummy_run:
+            from torch_xcpu import ops as xcpu_ops
+
+            previous_xcpu_dummy_run = xcpu_ops.is_dummy_run()
+            xcpu_ops.set_dummy_run(True)
+
         num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
         self.model_runner._dummy_run(num_tokens, uniform_decode=True)
+
+        if enable_xcpu_moe_dummy_run:
+            xcpu_ops.set_dummy_run(previous_xcpu_dummy_run)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

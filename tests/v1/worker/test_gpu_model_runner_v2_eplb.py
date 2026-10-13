@@ -2,9 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
+from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 import torch
 
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
@@ -202,3 +205,73 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
     output = mrv2.GPUModelRunner.sample_tokens(runner, None)
     assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
     assert events == ["receive", "postprocess_num_computed_tokens", "eplb"]
+
+
+@pytest.mark.parametrize("dp_size", [1, 2])
+@pytest.mark.parametrize("decode_query_len", [1, 5])
+@pytest.mark.parametrize("phase", ["runtime", "disabled", "profile", "warmup"])
+def test_xcpu_dummy_batch_marks_target_and_draft_only_at_runtime(
+    monkeypatch, dp_size, decode_query_len, phase
+):
+    from vllm.v1.worker import gpu_worker
+
+    runtime = SimpleNamespace(enabled=False)
+    runtime.is_dummy_run = lambda: runtime.enabled
+    runtime.set_dummy_run = lambda enabled: setattr(runtime, "enabled", enabled)
+    monkeypatch.setitem(sys.modules, "torch_xcpu", SimpleNamespace(ops=runtime))
+    monkeypatch.setattr(
+        gpu_worker, "current_platform", SimpleNamespace(device_name="mcpu")
+    )
+    monkeypatch.setattr(
+        gpu_worker.envs, "VLLM_XCPU_ENABLE_DUMMY_RUN_FAST_PATH", phase != "disabled"
+    )
+    events = []
+    runner = _make_runner(decode_query_len=decode_query_len)
+    runner.maybe_dummy_run_with_lora = lambda *args, **kwargs: nullcontext()
+    runner.model = SimpleNamespace()
+    runner.req_states = SimpleNamespace(
+        last_sampled_tokens=None, next_prefill_tokens=None
+    )
+    runner.sampler = SimpleNamespace(
+        sampling_states=SimpleNamespace(
+            temperature=SimpleNamespace(gpu=None), seeds=SimpleNamespace(gpu=None)
+        )
+    )
+
+    def execute_model(scheduler_output, **kwargs):
+        tokens = scheduler_output.total_num_scheduled_tokens
+        events.append(("target", runtime.enabled, tokens))
+        runner.execute_model_state = SimpleNamespace(
+            input_batch=SimpleNamespace(
+                num_reqs=1, num_tokens=tokens, logits_indices=[tokens - 1]
+            ),
+            attn_metadata=None,
+            slot_mappings_by_layer=None,
+            hidden_states=torch.zeros(tokens, 4),
+            aux_hidden_states=None,
+        )
+
+    def propose(**kwargs):
+        events.append(("draft", runtime.enabled, kwargs["input_batch"].num_tokens))
+
+    runner.execute_model = execute_model
+    runner.speculator = SimpleNamespace(supports_mm_inputs=False, propose=propose)
+    worker = SimpleNamespace(
+        model_runner=runner,
+        parallel_config=SimpleNamespace(data_parallel_size=dp_size, is_moe_model=True),
+    )
+    if phase in ("runtime", "disabled"):
+        gpu_worker.Worker.execute_dummy_batch(worker)
+    else:
+        runner._dummy_run(
+            decode_query_len,
+            uniform_decode=True,
+            is_profile=phase == "profile",
+            skip_eplb=phase == "warmup",
+        )
+
+    assert events == [
+        ("target", phase == "runtime", decode_query_len),
+        ("draft", phase == "runtime", decode_query_len),
+    ]
+    assert not runtime.enabled
