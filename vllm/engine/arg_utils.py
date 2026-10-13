@@ -1112,7 +1112,7 @@ class EngineArgs:
         # Parallel arguments
         parallel_kwargs = get_kwargs(ParallelConfig)
         # Bound from --moe-backend in KernelConfig.set_platform_defaults().
-        parallel_kwargs["all2all_backend"]["choices"].remove(
+        parallel_kwargs["all2all_backend"]["metavar"].remove(
             PASSTHROUGH_ALL2ALL_BACKEND
         )
         parallel_group = parser.add_argument_group(
