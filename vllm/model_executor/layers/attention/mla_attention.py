@@ -752,7 +752,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
             layer_slot_mapping = slot_mapping.get(self.layer_name)
-            assert self.use_pcp is False, "use_pcp must be False."
             if not kv_cache_updated:
                 kv_for_cache, kpe_for_cache, layer_slot_mapping = (
                     maybe_gather_mla_latent_cache_inputs(
