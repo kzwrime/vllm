@@ -1112,6 +1112,27 @@ class FusedMoEKernelModularImpl:
             self.fused_experts.finalize_weight_and_reduce_impl(),
         )
 
+        # Experts that manage their own scratch need only graph-local output.
+        # Keep the ContextVar-based workspace manager outside the full graph.
+        if prod(workspace13_shape) == 0 and prod(workspace2_shape) == 0:
+            workspace13 = torch.empty(
+                workspace13_shape, dtype=workspace_dtype, device=device
+            )
+            workspace2 = torch.empty(
+                workspace2_shape, dtype=workspace_dtype, device=device
+            )
+            if fused_out_alias is None:
+                fused_out = torch.empty(
+                    fused_out_shape, dtype=workspace_dtype, device=device
+                )
+            else:
+                assert fused_out_alias.shape == fused_out_shape
+                assert fused_out_alias.dtype == workspace_dtype
+                assert fused_out_alias.device == device
+                assert fused_out_alias.is_contiguous()
+                fused_out = fused_out_alias
+            return workspace13, workspace2, fused_out, fused_out_alias is not None
+
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
         # Reuse workspace13 for the output since there is only one chunk.
