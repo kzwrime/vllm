@@ -239,7 +239,15 @@ class Sampler:
             return logits
 
         # Copy logits to a new FP32 tensor.
-        logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
+        # XCPU copy requires a contiguous last dimension.
+        if logits.device.type == "mcpu" and logits.stride(-1) == 1:
+            import torch_xcpu
+
+            logits_new = torch.empty_like(logits, dtype=torch.float32)
+            torch_xcpu.ops.copy(output=logits_new, input=logits)
+            logits = logits_new
+        else:
+            logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 
         ctx = LogitsContext(
             expanded_idx_mapping=expanded_idx_mapping,
