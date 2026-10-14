@@ -83,6 +83,7 @@ from .qwen3_next import (
     Qwen3NextModel,
     Qwen3NextSparseMoeBlock,
     QwenNextMixtureOfExperts,
+    _should_pack_dflash2_aux,
 )
 from .qwen3_vl import (
     Qwen3_VisionTransformer,
@@ -275,6 +276,7 @@ class Qwen3_5Model(Qwen3NextModel):
             self.norm = PPMissingLayer()
 
         self.aux_hidden_state_layers: tuple[int, ...] = ()
+        self._use_packed_aux_hidden_states = _should_pack_dflash2_aux(vllm_config)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # FSE must match construction (Qwen3NextSparseMoeBlock): reroute the

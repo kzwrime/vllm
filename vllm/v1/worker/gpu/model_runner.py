@@ -2141,6 +2141,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert hidden_states is not None
         draft_hidden_states = hidden_states
         if self.pcp_manager is not None:
+            assert not isinstance(aux_hidden_states, torch.Tensor)
             hidden_states, aux_hidden_states, input_batch = (
                 self.pcp_manager.restore_for_sampling(hidden_states, aux_hidden_states)
             )
@@ -2414,7 +2415,7 @@ class ExecuteModelState(NamedTuple):
     attn_metadata: dict[str, Any] | None
     slot_mappings_by_layer: dict[str, torch.Tensor] | None
     hidden_states: torch.Tensor | None
-    aux_hidden_states: list[torch.Tensor] | None
+    aux_hidden_states: list[torch.Tensor] | torch.Tensor | None
     dp_sync: DPSyncState | None
     finished_req_ids: set[str]
     ec_connector_output: ECConnectorOutput | None
