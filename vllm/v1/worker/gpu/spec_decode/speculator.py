@@ -448,6 +448,21 @@ class DraftModelSpeculator(BaseSpeculator):
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
             )
+        elif (
+            logits.device.type == "mcpu"
+            and logits.dtype == torch.bfloat16
+            and logits.dim() == 2
+            and logits.is_contiguous()
+            # Each BF16 row must be 4-byte aligned for XCPU DMA.
+            and logits.size(1) % 2 == 0
+            and logits.storage_offset() % 2 == 0
+        ):
+            from torch_xcpu import ops as xcpu_ops
+
+            output = torch.empty(
+                logits.size(0), dtype=torch.int64, device=logits.device
+            )
+            sampled = xcpu_ops.argmax_out(logits, -1, False, output)
         else:
             sampled = logits.argmax(dim=-1)
         self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
