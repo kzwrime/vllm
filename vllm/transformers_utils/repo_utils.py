@@ -20,6 +20,7 @@ from huggingface_hub.utils import (
     RepositoryNotFoundError,
     RevisionNotFoundError,
 )
+from requests.exceptions import HTTPError
 
 from vllm import envs
 from vllm.logger import init_logger
@@ -314,6 +315,11 @@ def _try_download_from_hf_hub(
     """
     if Path(model).is_dir():
         return None
+    modelscope_not_found_errors: tuple[type[Exception], ...] = ()
+    if envs.VLLM_USE_MODELSCOPE:
+        from modelscope.hub.errors import NotExistError
+
+        modelscope_not_found_errors = (NotExistError,)
     try:
         return Path(
             hf_api().hf_hub_download(
@@ -329,6 +335,7 @@ def _try_download_from_hf_hub(
         RevisionNotFoundError,
         EntryNotFoundError,
         LocalEntryNotFoundError,
+        *modelscope_not_found_errors,
     ) as e:
         logger.debug("File or repository not found in hf_hub_download: %s", e)
         return None
@@ -339,6 +346,12 @@ def _try_download_from_hf_hub(
             exc_info=e,
         )
         return None
+    except HTTPError as e:
+        # New ModelScope versions wrap missing-file errors in requests.HTTPError.
+        if isinstance(e.__cause__, modelscope_not_found_errors):
+            logger.debug("File or repository not found in ModelScope download: %s", e)
+            return None
+        raise
 
 
 def get_hf_file_bytes(
