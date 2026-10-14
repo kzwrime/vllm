@@ -130,6 +130,7 @@ if TYPE_CHECKING:
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_USE_HW_AGNOSTIC: bool = False
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
+    VLLM_XCPU_GDN_COMPILE: bool = False
     VLLM_GDN_DECODE_KERNEL: Literal["cuda", "triton"] = "cuda"
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
@@ -1228,6 +1229,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_HW_AGNOSTIC": lambda: (
         os.getenv("VLLM_USE_HW_AGNOSTIC", "False").lower() in ("true", "1")
     ),
+    # Included in compilation factors so native and Python GDN caches differ.
+    "VLLM_XCPU_GDN_COMPILE": lambda: bool(int(os.getenv("VLLM_XCPU_GDN_COMPILE", "0"))),
     "VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE", "1"))
     ),
