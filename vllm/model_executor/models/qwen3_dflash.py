@@ -11,6 +11,7 @@ from torch import nn
 from transformers import Qwen3Config
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -613,9 +614,16 @@ class DFlashQwen3Model(nn.Module):
             self._rms_norm_eps,
         )
         if self._fused_kv_weight is not None:
-            all_kv_flat = F.linear(
-                normed_context_states, self._fused_kv_weight, self._fused_kv_bias
-            )
+            if envs.VLLM_USE_XCPU_LINEAR:
+                import torch_xcpu
+
+                all_kv_flat = torch_xcpu.ops.linear(
+                    normed_context_states, self._fused_kv_weight, self._fused_kv_bias
+                )
+            else:
+                all_kv_flat = F.linear(
+                    normed_context_states, self._fused_kv_weight, self._fused_kv_bias
+                )
             all_kv = all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
         else:
             layer_kv = []
