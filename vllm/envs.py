@@ -2378,8 +2378,6 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CONFIG_ROOT",
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
-        "VLLM_DP_RANK",
-        "VLLM_DP_RANK_LOCAL",
         "VLLM_DP_MASTER_IP",
         "VLLM_DP_MASTER_PORT",
         "VLLM_MP_RPC_READY_BASE_PORT",
