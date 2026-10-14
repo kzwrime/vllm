@@ -570,7 +570,6 @@ class DFlashQwen3Model(nn.Module):
 
         # RoPE parameters
         self._rope_head_size = attn0.rotary_emb.head_size
-        self._rope_cos_sin_cache = attn0.rotary_emb.cos_sin_cache
         self._rope_is_neox = attn0.rotary_emb.is_neox_style
         # Validation that RoPE params are the same across all layers
         for attn in layers_attn[1:]:
@@ -656,6 +655,7 @@ class DFlashQwen3Model(nn.Module):
         )
         return all_k_normed
 
+    # Shared context precompute for Qwen3 DFlash and its DFlash2 subclasses.
     def precompute_and_store_context_kv(
         self,
         context_states: torch.Tensor,
@@ -682,6 +682,8 @@ class DFlashQwen3Model(nn.Module):
             self._build_fused_kv_buffers()
 
         num_ctx = context_states.shape[0]
+        if num_ctx == 0:
+            return
         L = self._num_attn_layers
         kv = self._kv_size
         hd = self._head_dim
@@ -692,19 +694,11 @@ class DFlashQwen3Model(nn.Module):
 
         # --- Fused RoPE across all layers ---
         # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
-        # In-place RoPE: pass K as the "query" arg with key=None.
+        # Pass K as the "query" arg and consume the result for out-of-place RoPE.
         all_k_flat = all_k_normed.view(L * num_ctx, kv)
         positions_repeated = context_positions.repeat(L)
-        cos_sin_cache = self._rope_cos_sin_cache
-        if cos_sin_cache.dtype != all_k_flat.dtype:
-            cos_sin_cache = cos_sin_cache.to(dtype=all_k_flat.dtype)
-        ops.rotary_embedding(
-            positions_repeated,
-            all_k_flat,
-            None,
-            self._rope_head_size,
-            cos_sin_cache,
-            self._rope_is_neox,
+        all_k_flat, _ = self.layers[0].self_attn.rotary_emb(
+            positions_repeated, all_k_flat, None
         )
 
         if context_slot_mapping is None:
@@ -714,13 +708,22 @@ class DFlashQwen3Model(nn.Module):
         if v_scale is not None:
             all_v.mul_(v_scale)
 
-        # --- Per-layer cache insert ---
+        # --- Cache insert (grouped when supported by the backend) ---
         all_k_final = all_k_flat.view(L, num_ctx, nkv, hd)
         per_layer = isinstance(context_slot_mapping, (list, tuple))
-        for i in range(L):
-            slot_mapping = (
-                context_slot_mapping[i] if per_layer else context_slot_mapping
-            )
+        slot_mappings = [
+            context_slot_mapping[i] if per_layer else context_slot_mapping
+            for i in range(L)
+        ]
+        grouped_update = getattr(
+            self._attn_layers[0].impl, "do_kv_cache_update_grouped", None
+        )
+        if grouped_update is not None:
+            # The backend preserves per-layer updates for unsupported groups.
+            grouped_update(self._attn_layers, all_k_final, all_v, slot_mappings)
+            return
+
+        for i, slot_mapping in enumerate(slot_mappings):
             if slot_mapping is None:
                 continue  # dummy run: skip cache ops
             attn = self._attn_layers[i]
