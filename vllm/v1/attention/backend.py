@@ -61,6 +61,11 @@ class MultipleOf:
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""
 
+    @classmethod
+    def canonicalize_kv_cache_dtype(cls, kv_cache_dtype: "CacheDType") -> "CacheDType":
+        """Resolve a public cache dtype to the backend's storage format."""
+        return kv_cache_dtype
+
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = [
         "auto",
