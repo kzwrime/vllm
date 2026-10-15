@@ -1149,11 +1149,45 @@ def fast_topk(
         return torch.topk(values, topk, dim=dim)
 
 
+def _use_xcpu_pad(x: torch.Tensor) -> bool:
+    return (
+        x.device.type in ("mcpu", "privateuseone")
+        and x.ndim == 2
+        and x.is_contiguous()
+        and x.dtype in (torch.bfloat16, torch.float16, torch.float32)
+    )
+
+
+def sequence_parallel_pad(x: torch.Tensor, tp_size: int) -> torch.Tensor:
+    """Pad token rows for TP collectives, preserving aligned eager inputs."""
+    pad_len = (-x.shape[0]) % tp_size
+    # vLLM reuses compiled graphs without shape guards. Keep dynamic padding
+    # in the graph even when the tracing input is already aligned.
+    if not torch.compiler.is_compiling() and pad_len == 0:
+        return x
+    if _use_xcpu_pad(x):
+        from torch_xcpu.ops import constant_pad_2d
+
+        # Always returns fresh storage, including when pad_len is zero.
+        return constant_pad_2d(x, (0, 0, 0, pad_len))
+    return nn.functional.pad(x, (0, 0, 0, pad_len))
+
+
 # Chunk x along the num_tokens axis for sequence parallelism
 # NOTE: This is wrapped in a torch custom op to work around the following issue:
 # The output tensor can have a sequence length 0 at small input sequence lengths
 # even though we explicitly pad to avoid this.
 def sequence_parallel_chunk(x: torch.Tensor) -> torch.Tensor:
+    if torch.compiler.is_compiling() and _use_xcpu_pad(x):
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        y = sequence_parallel_pad(x, tp_size)
+        chunk = cdiv(x.shape[0], tp_size)
+        # Explicit view sizes avoid slice/narrow clamping symbolic lengths to
+        # zero during tracing. Padding owns fresh storage even when aligned.
+        return y.as_strided(
+            (chunk, x.shape[1]), y.stride(), tp_rank * chunk * y.stride(0)
+        )
     return torch.ops.vllm.sequence_parallel_chunk_impl(x)
 
 
@@ -1162,13 +1196,7 @@ def sequence_parallel_chunk_impl(x: torch.Tensor) -> torch.Tensor:
     tp_rank = get_tensor_model_parallel_rank()
 
     # all_gather needs the sequence length to be divisible by tp_size
-    seq_len = x.size(0)
-    remainder = seq_len % tp_size
-    if remainder != 0:
-        pad_len = tp_size - remainder
-        y = nn.functional.pad(x, (0, 0, 0, pad_len))
-    else:
-        y = x
+    y = sequence_parallel_pad(x, tp_size)
 
     chunk = y.shape[0] // tp_size
     start = tp_rank * chunk
