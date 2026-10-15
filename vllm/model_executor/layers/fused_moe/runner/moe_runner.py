@@ -416,6 +416,24 @@ class MoERunner(MoERunnerInterface):
                 shared_output *= 1.0 / self.routed_scaling_factor
         return shared_output, fused_output
 
+    def _combine_shared_expert_output(
+        self,
+        shared_output: torch.Tensor | None,
+        fused_output: torch.Tensor,
+    ) -> torch.Tensor:
+        """Scale, transform and add the routed output to the shared output.
+
+        OOT runners may override this to fuse the scale and add.
+        """
+        shared_output, fused_output = self._maybe_apply_routed_scale_to_output(
+            shared_output, fused_output
+        )
+        # Apply output transform (e.g. latent -> full dim)
+        fused_output = self.apply_routed_output_transform(fused_output)
+        if shared_output is not None:
+            return shared_output + fused_output
+        return fused_output
+
     @property
     def _fused_output_is_reduced(self) -> bool:
         return (
@@ -775,17 +793,7 @@ class MoERunner(MoERunnerInterface):
             shared_output, fused_output_is_reduced
         )
 
-        shared_output, fused_output = self._maybe_apply_routed_scale_to_output(
-            shared_output, fused_output
-        )
-
-        # Apply output transform (e.g. latent -> full dim)
-        fused_output = self.apply_routed_output_transform(fused_output)
-
-        if shared_output is not None:
-            result = shared_output + fused_output
-        else:
-            result = fused_output
+        result = self._combine_shared_expert_output(shared_output, fused_output)
 
         result = self._maybe_reduce_final_output(
             result, og_hidden_dim_post_xform, fused_output_is_reduced
