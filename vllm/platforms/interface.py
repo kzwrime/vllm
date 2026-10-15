@@ -22,6 +22,10 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.inputs import EngineInput
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEExperts
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -392,6 +396,19 @@ class Platform:
     ) -> str:
         """Get the attention backend class of a device."""
         return ""
+
+    @classmethod
+    def select_mxfp4_moe_backend(
+        cls,
+        moe_config: "FusedMoEConfig",
+        activation_key: "QuantKey | None",
+    ) -> "tuple[Mxfp4MoeBackend, type[FusedMoEExperts]] | None":
+        """Select the MXFP4 MoE backend and experts class for this platform.
+
+        ``activation_key`` is the requested activation quantization after user
+        overrides. Return None to use vLLM's built-in selection.
+        """
+        return None
 
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:

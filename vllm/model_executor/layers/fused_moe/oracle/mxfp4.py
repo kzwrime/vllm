@@ -586,6 +586,13 @@ def select_mxfp4_moe_backend(
     runner_backend = config.moe_backend
     requested_activation_key = _resolve_activation_key(activation_key)
 
+    if (
+        selected := current_platform.select_mxfp4_moe_backend(
+            config, requested_activation_key
+        )
+    ) is not None:
+        return selected
+
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if config.moe_parallel_config.use_batched_activation_format
