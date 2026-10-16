@@ -29,7 +29,10 @@ class _AllocationScope(AbstractContextManager):
 
 
 @pytest.mark.parametrize("hisparse", [False, True])
-def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch, hisparse) -> None:
+@pytest.mark.parametrize("custom_allocator", [False, True])
+def test_mrv2_kv_pool_only_wraps_backing_allocation(
+    monkeypatch, hisparse, custom_allocator
+) -> None:
     scope = _AllocationScope()
     kv_caches = {"layer": torch.empty(0)}
 
@@ -84,6 +87,7 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(monkeypatch, hisparse) -> No
         config,
         kv_cache_allocation_context=scope,
         block_tables=SimpleNamespace(),
+        allocator=allocate if custom_allocator else None,
     )
 
     assert len(hisparse_bindings) == int(hisparse)
