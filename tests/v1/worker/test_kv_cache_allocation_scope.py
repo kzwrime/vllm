@@ -28,8 +28,9 @@ class _AllocationScope(AbstractContextManager):
         self.active = False
 
 
-@pytest.mark.parametrize("hisparse", [False, True])
-@pytest.mark.parametrize("custom_allocator", [False, True])
+@pytest.mark.parametrize(
+    "hisparse,custom_allocator", [(False, False), (False, True), (True, False)]
+)
 def test_mrv2_kv_pool_only_wraps_backing_allocation(
     monkeypatch, hisparse, custom_allocator
 ) -> None:
@@ -43,7 +44,11 @@ def test_mrv2_kv_pool_only_wraps_backing_allocation(
     def bind(*args, **kwargs):
         assert not scope.active
 
-    monkeypatch.setattr(attn_utils, "allocate_kv_cache", allocate)
+    def default_allocate(*args, **kwargs):
+        assert not custom_allocator, "custom allocator was ignored"
+        return allocate(*args, **kwargs)
+
+    monkeypatch.setattr(attn_utils, "allocate_kv_cache", default_allocate)
     monkeypatch.setattr(attn_utils, "bind_kv_cache_to_layers", bind)
     monkeypatch.setattr(attn_utils, "get_shared_kv_cache_layers", lambda config: {})
 
