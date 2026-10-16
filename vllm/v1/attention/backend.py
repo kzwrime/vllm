@@ -71,6 +71,11 @@ class AttentionBackend(ABC):
     # Does attention's forward() include kv cache update?
     forward_includes_kv_cache_update: bool = True
 
+    @classmethod
+    def canonicalize_kv_cache_dtype(cls, kv_cache_dtype: "CacheDType") -> "CacheDType":
+        """Resolve a cache dtype alias for this backend's storage format."""
+        return kv_cache_dtype
+
     @staticmethod
     def get_supported_kernel_block_sizes(
         kv_cache_spec: "KVCacheSpec | None" = None,
