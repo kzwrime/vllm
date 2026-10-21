@@ -1692,6 +1692,12 @@ class FusedMoEKernel:
     def supports_lora(self) -> bool:
         return self.fused_experts.supports_lora()
 
+    def supports_num_valid_tokens(self) -> bool:
+        """Whether topk_weights/topk_ids may cover only the leading rows of
+        hidden_states. The remaining rows are padding whose output is unused.
+        """
+        return False
+
     def _post_init_setup(self):
         """Resolve any leftover setup dependencies between self.prepare_finalize
         and self.fused_experts here.
