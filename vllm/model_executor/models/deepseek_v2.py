@@ -90,7 +90,9 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     extract_layer_index,
+    sequence_parallel_add_rms_norm_chunk,
     sequence_parallel_chunk,
+    sequence_parallel_num_valid_rows,
     sequence_parallel_pad,
 )
 from vllm.platforms import current_platform
@@ -436,30 +438,51 @@ class DeepseekV2MoE(nn.Module):
         self,
         hidden_states: torch.Tensor,
         already_sequence_parallel: bool = False,
+        sp_num_tokens: int | None = None,
     ) -> torch.Tensor:
+        """With sp_num_tokens, hidden_states is already this rank's
+        sequence-parallel chunk of an sp_num_tokens-row batch; the output is
+        gathered back to sp_num_tokens rows unless already_sequence_parallel.
+        """
+        assert sp_num_tokens is None or self.is_sequence_parallel
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         # Chunk the hidden states so they aren't replicated across TP ranks.
         # This avoids duplicate computation in self.experts.
-        if self.is_sequence_parallel and not already_sequence_parallel:
+        if (
+            self.is_sequence_parallel
+            and not already_sequence_parallel
+            and sp_num_tokens is None
+        ):
             hidden_states = sequence_parallel_chunk(hidden_states)
+            sp_num_tokens = num_tokens
+
+        num_valid_tokens = None
+        if self.is_sequence_parallel and sp_num_tokens is not None:
+            # Kernels that support it skip the chunk's padding rows.
+            num_valid_tokens = sequence_parallel_num_valid_rows(sp_num_tokens)
 
         if self.experts.is_internal_router:
             final_hidden_states = self.experts(
-                hidden_states=hidden_states, router_logits=hidden_states
+                hidden_states=hidden_states,
+                router_logits=hidden_states,
+                num_valid_tokens=num_valid_tokens,
             )
         else:
             router_logits, _ = self.gate(hidden_states)
             final_hidden_states = self.experts(
-                hidden_states=hidden_states, router_logits=router_logits
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                num_valid_tokens=num_valid_tokens,
             )
 
         if self.is_sequence_parallel and not already_sequence_parallel:
             final_hidden_states = tensor_model_parallel_all_gather(
                 final_hidden_states, 0
             )
-            final_hidden_states = final_hidden_states[:num_tokens]
+            final_hidden_states = final_hidden_states[:sp_num_tokens]
+            return final_hidden_states.view(sp_num_tokens, hidden_dim)
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -1317,6 +1340,13 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+        # A sequence-parallel MoE after a full attention output: the norm
+        # writes this rank's padded chunk instead of the MoE padding a copy.
+        self.norm_writes_sequence_parallel_chunk = (
+            is_moe_layer
+            and self.mlp.is_sequence_parallel
+            and not self.use_sequence_parallel_moe
+        )
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
 
     def forward(
@@ -1367,14 +1397,24 @@ class DeepseekV2DecoderLayer(nn.Module):
                 residual = sequence_parallel_chunk(residual)
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-        if self.use_sequence_parallel_moe:
-            hidden_states = self.mlp(
-                hidden_states,
-                already_sequence_parallel=True,
+        if self.norm_writes_sequence_parallel_chunk:
+            hidden_states, residual = sequence_parallel_add_rms_norm_chunk(
+                self.post_attention_layernorm, hidden_states, residual
             )
+            # The returned residual keeps every token row.
+            hidden_states = self.mlp(hidden_states, sp_num_tokens=residual.shape[0])
         else:
-            hidden_states = self.mlp(hidden_states)
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual
+            )
+            if self.use_sequence_parallel_moe:
+                hidden_states = self.mlp(
+                    hidden_states,
+                    already_sequence_parallel=True,
+                    sp_num_tokens=full_num_tokens,
+                )
+            else:
+                hidden_states = self.mlp(hidden_states)
 
         if isinstance(self.mlp, DeepseekV2MLP) and hidden_states.dtype == torch.float16:
             # Fix FP16 overflow

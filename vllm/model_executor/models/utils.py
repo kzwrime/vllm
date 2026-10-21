@@ -1138,6 +1138,63 @@ direct_register_custom_op(
 )
 
 
+def sequence_parallel_num_valid_rows(num_tokens: int) -> int:
+    """Rows of this TP rank's sequence-parallel chunk that hold tokens.
+
+    The chunk has cdiv(num_tokens, tp_size) rows; the remaining ones are
+    padding.
+    """
+    tp_size = get_tensor_model_parallel_world_size()
+    tp_rank = get_tensor_model_parallel_rank()
+    chunk = cdiv(num_tokens, tp_size)
+    return max(0, min(chunk, num_tokens - tp_rank * chunk))
+
+
+def sequence_parallel_add_rms_norm_chunk(
+    norm: nn.Module, x: torch.Tensor, residual: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused add + RMSNorm whose output is this rank's sequence-parallel chunk.
+
+    Equals ``sequence_parallel_chunk`` of the normalized rows, padding rows
+    zero, while the returned residual keeps every row. On MCPU the norm
+    writes the chunk directly instead of normalizing every row and padding a
+    copy of them.
+    """
+    if (
+        x.device.type in ("mcpu", "privateuseone")
+        and x.ndim == 2
+        and residual.shape == x.shape
+        and x.dtype in (torch.bfloat16, torch.float32)
+        and residual.dtype == x.dtype
+        and x.stride(-1) == 1
+        and x.stride(0) >= x.shape[-1]
+        and residual.stride(-1) == 1
+        and residual.stride(0) >= residual.shape[-1]
+        and getattr(norm, "has_weight", False)
+        and getattr(norm, "variance_size_override", 0) is None
+        and norm.weight.dtype == x.dtype
+    ):
+        from torch_xcpu.ops import fused_add_rms_norm_chunk_out
+
+        tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_tensor_model_parallel_rank()
+        chunk = cdiv(x.shape[0], tp_size)
+        out = x.new_empty((chunk, x.shape[1]))
+        residual_out = x.new_empty(x.shape)
+        fused_add_rms_norm_chunk_out(
+            out,
+            residual_out,
+            x,
+            residual,
+            norm.weight.data,
+            norm.variance_epsilon,
+            tp_rank * chunk,
+        )
+        return out, residual_out
+    x, residual = norm(x, residual)
+    return sequence_parallel_chunk(x), residual
+
+
 def process_eagle_weight(
     model: nn.Module,
     name: str,

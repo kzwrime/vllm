@@ -122,6 +122,7 @@ def _moe_forward(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    num_valid_tokens: int | None = None,
 ) -> torch.Tensor:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer._forward_impl(
@@ -129,6 +130,7 @@ def _moe_forward(
         router_logits,
         shared_experts_input,
         input_ids,
+        num_valid_tokens,
     )
 
 
@@ -139,6 +141,7 @@ def _moe_forward_fake(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    num_valid_tokens: int | None = None,
 ) -> torch.Tensor:
     # `hidden_dim_unpadded > 0` only on the TRT-LLM MXFP4 path, where the
     # real kernel writes narrower than `hidden_states.shape[-1]`. Plumbed
@@ -156,6 +159,7 @@ def _moe_forward_shared(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    num_valid_tokens: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(_resolve_layer_name(layer_name))
     return layer._forward_impl(
@@ -163,6 +167,7 @@ def _moe_forward_shared(
         router_logits,
         shared_experts_input,
         input_ids,
+        num_valid_tokens,
     )
 
 
@@ -173,6 +178,7 @@ def _moe_forward_shared_fake(
     input_ids: torch.Tensor | None,
     layer_name: _layer_name_type,
     hidden_dim_unpadded: int,
+    num_valid_tokens: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # `fused_out`: see `_moe_forward_fake` for hidden_dim_unpadded semantics.
     # `shared_out`: matches `shared_experts_input` if provided (latent MoE),
@@ -563,6 +569,7 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
+        num_valid_tokens: int | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
         """Run expert routing and the fused MoE kernel via the quant method.
 
@@ -589,6 +596,15 @@ class MoERunner(MoERunnerInterface):
                 topk_indices_dtype=self._quant_method.topk_indices_dtype,
                 input_ids=input_ids,
             )
+
+            moe_kernel = self._quant_method.moe_kernel
+            if (
+                num_valid_tokens is not None
+                and moe_kernel is not None
+                and moe_kernel.supports_num_valid_tokens()
+            ):
+                topk_weights = topk_weights.narrow(0, 0, num_valid_tokens)
+                topk_ids = topk_ids.narrow(0, 0, num_valid_tokens)
 
             fused_out = self.routed_experts.forward_modular(
                 x=hidden_states,
@@ -656,12 +672,15 @@ class MoERunner(MoERunnerInterface):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        num_valid_tokens: int | None = None,
     ) -> torch.Tensor:
         """Invoke the fused moe layer.
 
         Input:
         - hidden_states
         - router_logits
+        - num_valid_tokens: if set, rows past it are padding whose output is
+          discarded; kernels that support it skip them.
 
         Output:
         - The new hidden_states.
@@ -704,6 +723,7 @@ class MoERunner(MoERunnerInterface):
             self.moe_config.hidden_dim_unpadded
             if self._quant_method.has_unpadded_output
             else 0,
+            num_valid_tokens,
         )
 
         #
@@ -792,6 +812,7 @@ class MoERunner(MoERunnerInterface):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
         input_ids: torch.Tensor | None = None,
+        num_valid_tokens: int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Entry point called by the custom op to run the MoE computation.
 
@@ -829,12 +850,16 @@ class MoERunner(MoERunnerInterface):
                 hidden_states,
                 router_logits,
             )
+            if self.do_naive_dispatch_combine or self.moe_config.pcp_size > 1:
+                # Dispatch may regather rows; padding is no longer trailing.
+                num_valid_tokens = None
 
             shared_output, hidden_states = self._apply_quant_method(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 shared_experts_input=shared_experts_input,
                 input_ids=input_ids,
+                num_valid_tokens=num_valid_tokens,
             )
 
             return self._maybe_combine(

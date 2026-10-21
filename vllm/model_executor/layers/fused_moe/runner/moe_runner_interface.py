@@ -36,6 +36,7 @@ class MoERunnerInterface(PluggableLayer, ABC):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
+        num_valid_tokens: int | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
