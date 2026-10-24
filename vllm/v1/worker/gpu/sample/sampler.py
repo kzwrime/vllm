@@ -12,6 +12,7 @@ from vllm.v1.sample.ops.topk_topp_sampler import (
     flashinfer_sample,
     flashinfer_sampler_supported,
 )
+from vllm.v1.worker.gpu import mcpu_ops
 from vllm.v1.worker.gpu.input_batch import InputBatch, get_num_sampled_and_rejected
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
@@ -48,6 +49,15 @@ class Sampler:
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
         self.bad_words_state = BadWordsState(req_states)
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
+        self._default_sampling_params = np.zeros(max_num_reqs, dtype=bool)
+        self._last_apply_used_default_fast_path = False
+        self.default_sampling_fast_path_hits = 0
+        self.default_sampling_fast_path_fallbacks = 0
+        self._processed_logits_buffer: torch.Tensor | None = None
+        self._processed_logits_input_dtype: torch.dtype | None = None
+        self._num_rejected_buffer = torch.empty(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
         self.num_speculative_tokens = num_speculative_tokens
         self.use_flashinfer = flashinfer_sampler_supported()
 
@@ -59,6 +69,9 @@ class Sampler:
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
         self.bad_words_state.add_request(req_idx, sampling_params)
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
+        self._default_sampling_params[req_idx] = self._is_default_sampling_params(
+            sampling_params
+        )
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
@@ -127,6 +140,7 @@ class Sampler:
             input_batch.cu_num_logits,
             input_batch.idx_mapping,
             self.req_states.prefill_len.gpu,
+            out=self._num_rejected_buffer[: input_batch.idx_mapping.shape[0]],
         )
 
         # These are GPU tensors.
@@ -152,13 +166,15 @@ class Sampler:
         expanded_local_pos: torch.Tensor,
         skip_top_k_top_p: bool = False,
     ) -> torch.Tensor:
-        import torch_xcpu
+        logits = self._copy_logits_to_fp32(logits)
 
-        # Copy logits to a new FP32 tensor.
-        # logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
-        logits_new = torch.empty_like(logits, dtype=torch.float32)
-        torch_xcpu.ops.copy(output=logits_new, input=logits)
-        logits = logits_new
+        self._last_apply_used_default_fast_path = bool(
+            self._default_sampling_params[idx_mapping_np].all()
+        )
+        if self._last_apply_used_default_fast_path:
+            self.default_sampling_fast_path_hits += 1
+            return logits
+        self.default_sampling_fast_path_fallbacks += 1
 
         # Apply logit bias (e.g., allowed_token_ids, min_tokens) in place.
         self.logit_bias_state.apply_logit_bias(
@@ -199,6 +215,49 @@ class Sampler:
             logits, expanded_idx_mapping, idx_mapping_np
         )
 
+    def _is_default_sampling_params(self, sampling_params: SamplingParams) -> bool:
+        top_k = sampling_params.top_k
+        if top_k <= 0 or top_k > self.sampling_states.vocab_size:
+            top_k = self.sampling_states.vocab_size
+        return bool(
+            not sampling_params.allowed_token_ids
+            and not sampling_params.logit_bias
+            and sampling_params.min_tokens == 0
+            and not sampling_params.bad_words_token_ids
+            and sampling_params.repetition_penalty == 1.0
+            and sampling_params.frequency_penalty == 0.0
+            and sampling_params.presence_penalty == 0.0
+            and sampling_params.temperature in (0.0, 1.0)
+            and sampling_params.min_p == 0.0
+            and top_k == self.sampling_states.vocab_size
+            and sampling_params.top_p == 1.0
+        )
+
+    def _copy_logits_to_fp32(self, logits: torch.Tensor) -> torch.Tensor:
+        if not mcpu_ops.is_mcpu():
+            return torch.empty_like(logits, dtype=torch.float32).copy_(logits)
+
+        import torch_xcpu
+
+        buffer = self._processed_logits_buffer
+        if (
+            buffer is None
+            or buffer.device != logits.device
+            or self._processed_logits_input_dtype != logits.dtype
+            or buffer.shape[1:] != logits.shape[1:]
+            or buffer.shape[0] < logits.shape[0]
+        ):
+            buffer = torch.empty(
+                (logits.shape[0], *logits.shape[1:]),
+                dtype=torch.float32,
+                device=logits.device,
+            )
+            self._processed_logits_buffer = buffer
+            self._processed_logits_input_dtype = logits.dtype
+        output = buffer[: logits.shape[0]]
+        torch_xcpu.ops.copy(output=output, input=logits)
+        return output
+
     def sample(
         self,
         logits: torch.Tensor,
@@ -218,9 +277,12 @@ class Sampler:
             expanded_local_pos,
             skip_top_k_top_p=True,
         )
-        top_k, top_p = self.sampling_states.get_top_k_top_p(
-            expanded_idx_mapping, idx_mapping_np
-        )
+        if self._last_apply_used_default_fast_path:
+            top_k = top_p = None
+        else:
+            top_k, top_p = self.sampling_states.get_top_k_top_p(
+                expanded_idx_mapping, idx_mapping_np
+            )
         use_flashinfer = self.use_flashinfer and not (
             # Don't use FI sampler if no requests use top_k/top_p, if there are
             # any greedy requests or per-request seeds, or if post-processed
