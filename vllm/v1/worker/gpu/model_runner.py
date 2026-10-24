@@ -603,6 +603,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 kv_cache_spec[name] = replace(kv_cache_spec[name], dcp_sharded=False)
         return kv_cache_spec
 
+    def allocate_kv_cache(self, *args, **kwargs):
+        """Allow device runners to supply persistent KV backing storage."""
+        from vllm.v1.worker.utils import allocate_kv_cache
+
+        return allocate_kv_cache(*args, **kwargs)
+
     def initialize_kv_cache(
         self,
         kv_cache_config: KVCacheConfig,
@@ -783,6 +789,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config,
                 kv_cache_allocation_context=kv_cache_allocation_context,
                 block_tables=self.block_tables,
+                allocator=self.allocate_kv_cache,
             )
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
