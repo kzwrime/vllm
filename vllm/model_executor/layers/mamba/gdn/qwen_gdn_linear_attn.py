@@ -431,24 +431,38 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # we need to create qkvz_proj adaptively here.
         # When create_in_proj_qkvz is False (e.g. LoRA enabled in Qwen3.5),
         # in_proj_qkv and in_proj_z are created separately instead.
-        self.in_proj_qkvz = self.create_qkvz_proj(
-            hidden_size=self.hidden_size,
-            key_dim=self.key_dim,
-            value_dim=self.value_dim,
-            quant_config=self.quant_config,
-            prefix=f"{prefix}.in_proj_qkvz",
+        self.use_fused_in_proj_qkvzba = self._should_fuse_in_proj_qkvzba(
+            config, vllm_config
         )
+        if self.use_fused_in_proj_qkvzba:
+            # One GEMM produces [q, k, v, z, b, a]; consumers take views.
+            self.in_proj_qkvzba = self.create_qkvzba_proj(
+                hidden_size=self.hidden_size,
+                key_dim=self.key_dim,
+                value_dim=self.value_dim,
+                num_v_heads=self.num_v_heads,
+                prefix=f"{prefix}.in_proj_qkvzba",
+            )
+            self.disable_tp_for_ba_proj = False
+        else:
+            self.in_proj_qkvz = self.create_qkvz_proj(
+                hidden_size=self.hidden_size,
+                key_dim=self.key_dim,
+                value_dim=self.value_dim,
+                quant_config=self.quant_config,
+                prefix=f"{prefix}.in_proj_qkvz",
+            )
 
-        # ba_proj doesn't support blockwise fp8 quantization.
-        # Qwen3-Next and Qwen3.5 have different in_proj_ba checkpoint
-        # layouts, so we use a factory method to create the projection.
-        self.in_proj_ba = self.create_ba_proj(
-            hidden_size=self.hidden_size,
-            num_v_heads=self.num_v_heads,
-            quant_config=self.quant_config,
-            prefix=f"{prefix}.in_proj_ba",
-        )
-        self.disable_tp_for_ba_proj = self.maybe_disable_tp(self.quant_config)
+            # ba_proj doesn't support blockwise fp8 quantization.
+            # Qwen3-Next and Qwen3.5 have different in_proj_ba checkpoint
+            # layouts, so we use a factory method to create the projection.
+            self.in_proj_ba = self.create_ba_proj(
+                hidden_size=self.hidden_size,
+                num_v_heads=self.num_v_heads,
+                quant_config=self.quant_config,
+                prefix=f"{prefix}.in_proj_ba",
+            )
+            self.disable_tp_for_ba_proj = self.maybe_disable_tp(self.quant_config)
 
         query_key_settings = (self.key_dim, 0, False)
         value_settings = (self.value_dim, 0, False)
@@ -595,6 +609,104 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             quant_config=quant_config,
             prefix=prefix,
         )
+
+    def _should_fuse_in_proj_qkvzba(
+        self,
+        config: Qwen3NextConfig,
+        vllm_config: VllmConfig,
+    ) -> bool:
+        enabled = (
+            envs.VLLM_XCPU_FUSE_GDN_IN_PROJ_QKVZBA
+            and current_platform.device_name == "mcpu"
+            and not self.gqa_interleaved_layout
+            and self.quant_config is None
+            and vllm_config.lora_config is None
+            and vllm_config.model_config.dtype == torch.bfloat16
+            and config.model_type in ("qwen3_5_text", "qwen3_5_moe_text")
+        )
+        if enabled:
+            logger.info_once(
+                "Using fused Qwen GDN in_proj_qkvzba on XCPU.", scope="local"
+            )
+        return enabled
+
+    def create_qkvzba_proj(
+        self,
+        hidden_size: int,
+        key_dim: int,
+        value_dim: int,
+        num_v_heads: int,
+        prefix: str,
+    ) -> MergedColumnParallelLinear:
+        # Each shard is TP-split independently, so the local output stays in
+        # [q, k, v, z, b, a] order like the separate qkvz and ba projections.
+        return MergedColumnParallelLinear(
+            input_size=hidden_size,
+            output_sizes=[
+                key_dim,
+                key_dim,
+                value_dim,
+                value_dim,
+                num_v_heads,
+                num_v_heads,
+            ],
+            bias=False,
+            quant_config=None,
+            prefix=prefix,
+        )
+
+    def _project_qkvz_ba(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Part 1: input projection, returning (mixed_qkvz, ba).
+
+        With the fused projection both results are row-strided views of one
+        GEMM output; downstream splits remain metadata-only.
+        """
+        if not self.use_fused_in_proj_qkvzba:
+            mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
+            ba, _ = self.in_proj_ba(hidden_states)
+            return mixed_qkvz, ba
+
+        mixed_qkvzba, _ = self.in_proj_qkvzba(hidden_states)
+        qkvz_size = (2 * self.key_dim + 2 * self.value_dim) // self.tp_size
+        ba_size = 2 * self.num_v_heads // self.tp_size
+        mixed_qkvz, ba = mixed_qkvzba.split([qkvz_size, ba_size], dim=-1)
+        return mixed_qkvz, ba
+
+    def _split_qkvzba(
+        self, mixed_qkvzba: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Split the packed projection into (mixed_qkv, z, b, a) views."""
+        qkv_size = (2 * self.key_dim + self.value_dim) // self.tp_size
+        z_size = self.value_dim // self.tp_size
+        ba_size = self.num_v_heads // self.tp_size
+        mixed_qkv, z, b, a = mixed_qkvzba.split(
+            [qkv_size, z_size, ba_size, ba_size], dim=-1
+        )
+        return mixed_qkv, z.view(z.size(0), -1, self.head_v_dim), b, a
+
+    def _forward_fused_qkvzba(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Python-core forward with the packed projection.
+
+        qwen_gdn_attention_core declares `a` as mutated, so passing views of
+        the shared projection makes functionalization clone the whole buffer
+        while z is still live. The packed op only mutates core_attn_out.
+        """
+        mixed_qkvzba, _ = self.in_proj_qkvzba(hidden_states)
+        z = self._split_qkvzba(mixed_qkvzba)[1]
+        # The XCPU core initializes dummy output and padding itself.
+        core_attn_out = torch.empty(
+            (hidden_states.size(0), self.num_v_heads // self.tp_size, self.head_v_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+        torch.ops.vllm.qwen_gdn_attention_core_qkvzba(
+            mixed_qkvzba,
+            core_attn_out,
+            layer_name=_encode_layer_name(self.prefix),
+        )
+        return self._output_projection(core_attn_out, z)
 
     def create_ba_proj(
         self,
@@ -883,8 +995,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         available, otherwise falling back to the generic CUDA path."""
         if GDN_AITER_TRITON_AVAILABLE:
             num_tokens = hidden_states.size(0)
-            projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
-            projected_states_ba, _ = self.in_proj_ba(hidden_states)
+            projected_states_qkvz, projected_states_ba = self._project_qkvz_ba(
+                hidden_states
+            )
             projected_states_qkvz = projected_states_qkvz.view(num_tokens, -1)
             projected_states_ba = projected_states_ba.view(num_tokens, -1)
             core_attn_out = torch.empty(
@@ -920,12 +1033,14 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         2. Core attention (custom op)
         3. Output projection
         """
+        if self.use_fused_in_proj_qkvzba:
+            return self._forward_fused_qkvzba(hidden_states)
+
         num_tokens = hidden_states.size(0)
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
+        mixed_qkvz, ba = self._project_qkvz_ba(hidden_states)
 
         use_fused_gdn_spec_decode = (
             self.enable_fused_gdn_spec_decode
@@ -1009,8 +1124,9 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 1: Input Projection
         # ============================================================
-        projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        projected_states_ba, _ = self.in_proj_ba(hidden_states)
+        projected_states_qkvz, projected_states_ba = self._project_qkvz_ba(
+            hidden_states
+        )
 
         # ============================================================
         # Part 2: Core Attention
@@ -1041,8 +1157,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> torch.Tensor:
         assert not hasattr(self, "in_proj_qkv"), "lora isn't supported on CPU."
 
-        mixed_qkvz, _ = self.in_proj_qkvz(hidden_states)
-        ba, _ = self.in_proj_ba(hidden_states)
+        mixed_qkvz, ba = self._project_qkvz_ba(hidden_states)
 
         if self.gqa_interleaved_layout:
             # Qwen3-Next: unpack the interleaved GQA layout
@@ -1993,6 +2108,35 @@ direct_register_custom_op(
     op_name="qwen_gdn_attention_core",
     op_func=qwen_gdn_attention_core,
     mutates_args=["a_or_z_out", "core_attn_out"],
+)
+
+
+def qwen_gdn_attention_core_qkvzba(
+    mixed_qkvzba: torch.Tensor,
+    core_attn_out: torch.Tensor,
+    layer_name: LayerNameType,
+) -> None:
+    """Run the GDN core from the packed [q, k, v, z, b, a] projection.
+
+    Splitting inside the op keeps the projection read-only at the dispatcher
+    boundary; only ``core_attn_out`` is mutated.
+    """
+    layer_name = _resolve_layer_name(layer_name)
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    mixed_qkv, _, b, a = self._split_qkvzba(mixed_qkvzba)
+    self._forward_core(
+        mixed_qkv=mixed_qkv,
+        b=b,
+        a=a,
+        core_attn_out=core_attn_out,
+    )
+
+
+direct_register_custom_op(
+    op_name="qwen_gdn_attention_core_qkvzba",
+    op_func=qwen_gdn_attention_core_qkvzba,
+    mutates_args=["core_attn_out"],
 )
 
 
