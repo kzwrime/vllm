@@ -117,10 +117,15 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from vllm.config.quantization import _ONLINE_SHORTHANDS
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
-    if current_platform.is_cuda() or current_platform.is_rocm():
+    if (
+        current_platform.is_cuda()
+        or current_platform.is_rocm()
+        or current_platform.is_out_of_tree()
+    ):
         # The v4.1 class is the v4 one extended to accept model_type
         # "deepseek_v41" and its 32x32 MXFP8 linear layout. V4.1 has
-        # platform-specific implementations for both CUDA and ROCm.
+        # platform-specific implementations for CUDA and ROCm; out-of-tree
+        # platforms supply their own and pick kernels through the registries.
         from vllm.models.deepseek_v41 import (
             DeepseekV4FP8Config as DeepseekV41FP8Config,
         )
