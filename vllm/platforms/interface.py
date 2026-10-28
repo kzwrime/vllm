@@ -1280,6 +1280,14 @@ class Platform:
         return False
 
     @classmethod
+    def support_mamba_metadata_reuse(cls) -> bool:
+        """Whether MRV2 may build Mamba/GDN metadata once per KV cache spec
+        and re-gather the state indices of the other groups
+        (update_block_table), including the aligned state-index precompute
+        of mamba_cache_mode="align"."""
+        return cls._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
+
+    @classmethod
     def support_static_graph_mode(cls) -> bool:
         """Returns if the graph mode is supported by the current platform."""
         return False

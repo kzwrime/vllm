@@ -12,6 +12,7 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
 )
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -128,12 +129,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         # it.
         self.supports_update_block_table = (
             vllm_config.use_v2_model_runner
-            and device.type == "cuda"
+            and current_platform.support_mamba_metadata_reuse()
             # Not isinstance: KDA's RecoverSSM/checkpoint metadata is per group.
             and type(self) is GDNAttentionMetadataBuilder
         )
         if self.supports_update_block_table:
-            # Opts into MRV2's CUDA-only aligned-index precompute.
+            # Opts into MRV2's aligned-index precompute.
             self.mamba_aligned_state_indices: torch.Tensor | None = None
 
         self.decode_cudagraph_max_bs: int = (
