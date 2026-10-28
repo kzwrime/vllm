@@ -704,6 +704,13 @@ def select_deepseek_v4_mxfp4_moe_backend(
     """Select the MXFP4 MoE backend with MXFP8 activation as top priority.
     Falls back through BF16 and other backends.
     """
+    if (
+        selected := current_platform.select_mxfp4_moe_backend(
+            config, _resolve_activation_key(None)
+        )
+    ) is not None:
+        return selected
+
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if config.moe_parallel_config.use_batched_activation_format
