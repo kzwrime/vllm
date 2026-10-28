@@ -62,6 +62,7 @@ from vllm.distributed.device_communicators.shm_broadcast import (
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
@@ -409,7 +410,8 @@ def _hash_ids_kernel(
             tl.store(output + out_offset, hashed, valid[:, None] & (head < num_heads))
 
 
-class NgramHashState(nn.Module):
+@PluggableLayer.register("deepseek_v41_ngram_hash_state")
+class NgramHashState(PluggableLayer):
     """Maps each position to the hash ids of the n-grams ending there.
 
     Stateless on the V2 runner, which supplies every lookback token id. On
@@ -911,7 +913,8 @@ def _allocate_huge_page_storage(num_bytes: int) -> torch.Tensor | None:
     return tensor
 
 
-class ParallelEngramEmbedding(nn.Module):
+@PluggableLayer.register("deepseek_v41_parallel_engram_embedding")
+class ParallelEngramEmbedding(PluggableLayer):
     """Hash heads with FP8 rows and per-block E8M0 scales.
 
     Heads are TP-sharded, and additionally DP-sharded across a node-local
@@ -971,9 +974,9 @@ class ParallelEngramEmbedding(nn.Module):
         self.vocab_start_idx = sum(head_sizes[: self.head_start])
         self.vocab_end_idx = sum(head_sizes[:head_end])
         self.part_num_embeddings = self.vocab_end_idx - self.vocab_start_idx
-        self._num_sms = torch.cuda.get_device_properties(
+        self._num_sms = current_platform.num_compute_units(
             torch.accelerator.current_device_index()
-        ).multi_processor_count
+        )
         weight, scales = self._allocate_weights()
         self.weight = nn.Parameter(weight, requires_grad=False)
         self.weight_scale_inv = nn.Parameter(scales, requires_grad=False)
@@ -985,11 +988,12 @@ class ParallelEngramEmbedding(nn.Module):
                     "engram_vocab_start": self.vocab_start_idx,
                 },
             )
+        # Constant dummy values avoid randomizing huge CPU lookup tables, and
+        # dummy loading leaves the integer scales uninitialized otherwise.
+        set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
+        # The ue8m0 encoding of scale 1.0 is exponent byte 127.
+        set_weight_attrs(self.weight_scale_inv, {"dummy_weight_value": 127})
         if cpu_offload:
-            # Constant dummy values avoid randomizing huge CPU lookup tables.
-            set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
-            # The ue8m0 encoding of scale 1.0 is exponent byte 127.
-            set_weight_attrs(self.weight_scale_inv, {"dummy_weight_value": 127})
             logger.info(
                 "Engram table offloaded to pinned host memory: %d rows x %d, "
                 "%.2f GiB %s",
@@ -1311,7 +1315,8 @@ def _gather_engram_rows(staged: torch.Tensor, num_tokens: int) -> torch.Tensor:
     return rows
 
 
-class Engram(nn.Module):
+@PluggableLayer.register("deepseek_v41_engram")
+class Engram(PluggableLayer):
     """Writes an n-gram lookup into the residual stream, gated by how well it
     matches that stream.
 
@@ -1483,21 +1488,42 @@ class Engram(nn.Module):
         tokens, pre sequence-parallel shard); token_mask: [T], False shuts
         the gate so those positions pass through untouched."""
         kv = self.wkv(self.embed(hash_ids).flatten(-2))
-        num_kv_tokens = hash_ids.shape[0]
-        assert token_mask is None or token_mask.shape == (num_kv_tokens,)
-        if self.use_sequence_parallel:
-            tp_size = get_tensor_model_parallel_world_size()
-            tp_rank = get_tensor_model_parallel_rank()
-            shard_size = (num_kv_tokens + tp_size - 1) // tp_size
-            assert hidden_states.shape[0] == shard_size
-            start = min(tp_rank * shard_size, num_kv_tokens)
-            num_kv_tokens = min(shard_size, num_kv_tokens - start)
-            if token_mask is not None:
-                token_mask = token_mask[start : start + num_kv_tokens]
+        num_kv_tokens, token_mask = self._local_kv_tokens(hash_ids.shape[0], token_mask)
+        return self._post_wkv(hidden_states, kv, token_mask, num_kv_tokens)
 
+    def _local_kv_tokens(
+        self, num_kv_tokens: int, token_mask: torch.Tensor | None
+    ) -> tuple[int, torch.Tensor | None]:
+        """The tokens of this rank's sequence-parallel shard that have kv rows
+        (the last shard may be short), and their slice of `token_mask`.
+
+        sym_min keeps a traced graph valid for every token count.
+        """
+        if not self.use_sequence_parallel:
+            return num_kv_tokens, token_mask
+        tp_size = get_tensor_model_parallel_world_size()
+        shard_size = (num_kv_tokens + tp_size - 1) // tp_size
+        start = torch.sym_min(
+            get_tensor_model_parallel_rank() * shard_size, num_kv_tokens
+        )
+        local_tokens = torch.sym_min(shard_size, num_kv_tokens - start)
+        if token_mask is not None:
+            token_mask = token_mask[start : start + local_tokens]
+        return local_tokens, token_mask
+
+    def _post_wkv(
+        self,
+        hidden_states: torch.Tensor,
+        kv: torch.Tensor,
+        token_mask: torch.Tensor | None,
+        num_kv_tokens: int,
+    ) -> torch.Tensor:
+        """Gate the `wkv` output of the first `num_kv_tokens` rows into the
+        stream; the remaining rows pass through."""
         num_tokens, hc_mult, dim = hidden_states.shape
         assert hc_mult == self.hc_mult and dim == self.dim
-        assert kv.ndim == 2 and kv.shape[1] == (hc_mult + 1) * dim
+        assert kv.shape == (num_tokens, (hc_mult + 1) * dim)
+        assert token_mask is None or token_mask.shape == (num_kv_tokens,)
         output = torch.empty_like(hidden_states)
         if num_tokens == 0:
             return output
