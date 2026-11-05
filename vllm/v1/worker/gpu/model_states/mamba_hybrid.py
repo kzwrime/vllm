@@ -286,7 +286,19 @@ class MambaHybridModelState(DefaultModelState):
             # Test request state, not num_scheduled_tokens == draft_count+1:
             # adaptive rewrites num_scheduled_tokens to an even split, so that
             # equality rarely holds and would demote every verify row to decode.
-            is_decode = ~is_prefilling_np & (input_batch.num_scheduled_tokens > 0)
+            # A real decode row never carries more than 1 + num_spec tokens.
+            # Longer rows only come from non-uniform dummy runs (compile
+            # warmup, TRACE_ONCE tracing), whose rows are neither prefilling
+            # nor drafted; routing them to the spec kernels hands it sequences
+            # far beyond the num_spec + 1 state slots it is sized for, so they
+            # take the prefill (chunk) path instead.
+            max_decode_tokens = 1 + self.vllm_config.num_speculative_tokens
+            num_scheduled_tokens = input_batch.num_scheduled_tokens
+            is_decode = (
+                ~is_prefilling_np
+                & (num_scheduled_tokens > 0)
+                & (num_scheduled_tokens <= max_decode_tokens)
+            )
             num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
                 is_decode, num_draft_tokens_per_req, -1
             )
