@@ -418,6 +418,33 @@ class IrOp:
         )
 
     @contextlib.contextmanager
+    def functional(self):
+        """Scope in which dispatch skips inplace impls for this op.
+
+        Outputs produced inside the scope are written to fresh buffers instead
+        of donated activation memory, so they can safely outlive the scope
+        (e.g. a tensor captured for later use while the activation buffer is
+        reused by subsequent ops). No-op when the current priority already
+        excludes inplace impls (e.g. under torch.compile, where platforms
+        select functional-first priorities).
+        """
+        if not self._priority_impls:
+            yield
+            return
+        current = self.get_priority()
+        functional_priority = [p for p in current if not self.impls[p].inplace] or [
+            "native"
+        ]
+        if len(functional_priority) == len(current):
+            # All current impls are already functional; nothing to scope.
+            yield
+            return
+        if "native" not in functional_priority:
+            functional_priority.append("native")
+        with self.set_priority(functional_priority):
+            yield
+
+    @contextlib.contextmanager
     def set_priority(self, priority: list[str]):
         """Context manager setting the dispatch priority for this op's impls."""
         old_priority_impls = self._priority_impls

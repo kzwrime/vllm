@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only DeepseekV2/DeepseekV3 model."""
 
+import contextlib
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
@@ -45,6 +46,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
 )
+from vllm.ir import ops as ir_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (
@@ -1410,6 +1412,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         llama_4_scaling: torch.Tensor | None = None,
         input_is_sequence_parallel: bool = False,
+        capture_input_sum: bool = False,
     ) -> torch.Tensor:
         # Callers track the layout: with fewer tokens than TP ranks a full
         # tensor and a padded SP shard have the same number of rows.
@@ -1418,12 +1421,23 @@ class DeepseekV2DecoderLayer(nn.Module):
             self.use_sequence_parallel_moe and residual is not None
         )
 
-        # Self Attention
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        # EAGLE3-style aux_hidden_state capture: the caller asks for the
+        # pre-norm sum hidden_states + residual, which input_layernorm already
+        # computes internally. Return that sum instead of letting the caller
+        # recompute the add. The captured buffer must outlive this layer, so
+        # the fused_add_rms_norm calls below run with inplace impls disabled
+        # (fresh output buffers); otherwise post_attention_layernorm would
+        # overwrite the sum in the donated residual buffer. Under
+        # torch.compile the op priority is functional-first already and the
+        # scope is a no-op.
+        with self._functional_norm_scope(capture_input_sum):
+            # Self Attention
+            if residual is None:
+                residual = hidden_states
+                hidden_states = self.input_layernorm(hidden_states)
+            else:
+                hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        input_sum = residual
 
         if input_is_sequence_parallel:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
@@ -1456,16 +1470,19 @@ class DeepseekV2DecoderLayer(nn.Module):
                 residual = sequence_parallel_chunk(residual)
 
         # Fully Connected
+        with self._functional_norm_scope(capture_input_sum):
+            if self.norm_writes_sequence_parallel_chunk:
+                hidden_states, residual = sequence_parallel_add_rms_norm_chunk(
+                    self.post_attention_layernorm, hidden_states, residual
+                )
+            else:
+                hidden_states, residual = self.post_attention_layernorm(
+                    hidden_states, residual
+                )
         if self.norm_writes_sequence_parallel_chunk:
-            hidden_states, residual = sequence_parallel_add_rms_norm_chunk(
-                self.post_attention_layernorm, hidden_states, residual
-            )
             # The returned residual keeps every token row.
             hidden_states = self.mlp(hidden_states, sp_num_tokens=residual.shape[0])
         else:
-            hidden_states, residual = self.post_attention_layernorm(
-                hidden_states, residual
-            )
             if self.use_sequence_parallel_moe:
                 hidden_states = self.mlp(
                     hidden_states,
@@ -1483,7 +1500,16 @@ class DeepseekV2DecoderLayer(nn.Module):
             # of DeepseekV2MOE
             hidden_states *= 1.0 / self.routed_scaling_factor
 
+        if capture_input_sum:
+            return hidden_states, residual, input_sum
         return hidden_states, residual
+
+    @staticmethod
+    def _functional_norm_scope(capture: bool):
+        """Inplace-free fused_add_rms_norm scope used for aux sum capture."""
+        if capture:
+            return ir_ops.fused_add_rms_norm.functional()
+        return contextlib.nullcontext()
 
 
 @support_torch_compile
@@ -1623,8 +1649,19 @@ class DeepseekV2Model(nn.Module):
                 )
                 hidden_states_are_sequence_parallel = False
             if idx in self.aux_hidden_state_layers:
-                aux_hidden_state = (
-                    hidden_states if residual is None else hidden_states + residual
+                # The layer's input_layernorm already computes the pre-norm
+                # sum hidden_states + residual; let it hand that sum back
+                # instead of re-adding here. The extra out-of-place add used
+                # to be the only non-pooled allocation in the compiled graph
+                # and ran on an unprofiled host fallback path, showing up as
+                # a per-14-layer mcpu stream gap.
+                hidden_states, residual, aux_hidden_state = layer(
+                    positions,
+                    hidden_states,
+                    residual,
+                    llama_4_scaling,
+                    input_is_sequence_parallel=hidden_states_are_sequence_parallel,
+                    capture_input_sum=True,
                 )
                 if hidden_states_are_sequence_parallel:
                     aux_hidden_state = tensor_model_parallel_all_gather(
@@ -1632,13 +1669,14 @@ class DeepseekV2Model(nn.Module):
                     )
                     aux_hidden_state = aux_hidden_state[: positions.shape[0]]
                 aux_hidden_states.append(aux_hidden_state)
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-                llama_4_scaling,
-                input_is_sequence_parallel=hidden_states_are_sequence_parallel,
-            )
+            else:
+                hidden_states, residual = layer(
+                    positions,
+                    hidden_states,
+                    residual,
+                    llama_4_scaling,
+                    input_is_sequence_parallel=hidden_states_are_sequence_parallel,
+                )
             hidden_states_are_sequence_parallel = layer_uses_sequence_parallel
 
         if not get_pp_group().is_last_rank:
@@ -1654,9 +1692,13 @@ class DeepseekV2Model(nn.Module):
         )
 
         if self.end_layer in self.aux_hidden_state_layers:
-            aux_hidden_states.append(hidden_states + residual)
-
-        hidden_states, _ = self.norm(hidden_states, residual)
+            # The final norm computes the same pre-norm sum; reuse its
+            # residual output instead of another add.
+            with ir_ops.fused_add_rms_norm.functional():
+                hidden_states, final_sum = self.norm(hidden_states, residual)
+            aux_hidden_states.append(final_sum)
+        else:
+            hidden_states, _ = self.norm(hidden_states, residual)
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
