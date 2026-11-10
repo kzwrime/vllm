@@ -315,6 +315,8 @@ if TYPE_CHECKING:
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_USE_XCPU_LINEAR: bool = False
     VLLM_XCPU_FUSE_GDN_IN_PROJ_QKVZBA: bool = True
+    VLLM_XCPU_COMPILE_PASS_DEEPSEEK_V32_FUSED_MLA_QNORM_QB_UK_ROPE_CACHE: bool = False
+    VLLM_XCPU_COMPILE_PASS_DEEPSEEK_V32_FUSED_MLA_ADD_NORM_QKVA_QNORM_QB_UK_ROPE_CACHE: bool = False  # noqa: E501
     VLLM_XCPU_USE_FUSED_FFN: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
@@ -2173,6 +2175,32 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # compilation factors because it changes the projection graph.
     "VLLM_XCPU_FUSE_GDN_IN_PROJ_QKVZBA": lambda: bool(
         int(os.getenv("VLLM_XCPU_FUSE_GDN_IN_PROJ_QKVZBA", "1"))
+    ),
+    # deepseek_v32 MLA front-half pattern passes (vllm-xcpu-plugin). Included
+    # in compilation factors because they rewrite the post-grad graph. The
+    # ops' TORCH_XCPU_*_IMPL envs only pick a kernel at run time inside one
+    # graph and are deliberately not hashed.
+    "VLLM_XCPU_COMPILE_PASS_DEEPSEEK_V32_FUSED_MLA_QNORM_QB_UK_ROPE_CACHE": (
+        lambda: bool(
+            int(
+                os.getenv(
+                    "VLLM_XCPU_COMPILE_PASS_DEEPSEEK_V32_"
+                    "FUSED_MLA_QNORM_QB_UK_ROPE_CACHE",
+                    "0",
+                )
+            )
+        )
+    ),
+    "VLLM_XCPU_COMPILE_PASS_DEEPSEEK_V32_FUSED_MLA_ADD_NORM_QKVA_QNORM_QB_UK_ROPE_CACHE": (  # noqa: E501
+        lambda: bool(
+            int(
+                os.getenv(
+                    "VLLM_XCPU_COMPILE_PASS_DEEPSEEK_V32_FUSED_MLA_ADD_NORM_QKVA_"
+                    "QNORM_QB_UK_ROPE_CACHE",
+                    "0",
+                )
+            )
+        )
     ),
     # Use torch_xcpu fused dense FFN for supported XCPU SwiGLU MLP layers.
     "VLLM_XCPU_USE_FUSED_FFN": lambda: bool(
