@@ -214,6 +214,17 @@ class UnquantizedLinearMethod(LinearMethodBase):
             from vllm.model_executor.layers.utils import dispatch_cpu_unquantized_gemm
 
             dispatch_cpu_unquantized_gemm(layer, remove_weight=True)
+        elif envs.VLLM_USE_XCPU_LINEAR:
+            # mcpu/PrivateUse1 platforms report is_cpu() == False and route
+            # every unquantized GEMM through default_unquantized_gemm. Take
+            # over BF16 linears with the packed torch_xcpu BF16 backend here;
+            # the raw weight is freed unless a deferred consumer needs it.
+            if getattr(layer, "_cpu_skip_gemm_dispatch", False):
+                return
+
+            from vllm.model_executor.layers.utils import dispatch_xcpu_bf16_linear
+
+            dispatch_xcpu_bf16_linear(layer, remove_weight=True)
         elif current_platform.is_xpu():
             # Opt-in: F.linear on XPU is faster with an N-contiguous (N, K) weight
             # when K > N, but oneDNN's ab-weights matmul is not run-to-run bitwise

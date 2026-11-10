@@ -236,6 +236,14 @@ class DFlashQwen3Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
+        if envs.VLLM_USE_XCPU_LINEAR and isinstance(
+            self.qkv_proj.quant_method, UnquantizedLinearMethod
+        ):
+            # The model stacks the KV rows of every qkv_proj weight after load
+            # (see _build_context_kv_buffers). Keep the raw weight alive past
+            # the BF16 packed-linear dispatch; the stash is released once the
+            # fused-KV buffer has been built.
+            self.qkv_proj._xcpu_keep_raw_weight = True
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
@@ -534,19 +542,58 @@ class DFlashQwen3Model(nn.Module):
             isinstance(proj.quant_method, UnquantizedLinearMethod)
             for proj in self._context_qkv_projs
         ):
-            # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
-            kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
-            self._fused_kv_weight: torch.Tensor | None = torch.cat(kv_weights, dim=0)
+            # KV projection weights: [num_layers * 2 * kv_size, hidden_size].
+            # The qkv_proj weight may already be prepacked (and freed) by the
+            # torch_xcpu BF16 linear dispatch, so read through the raw stash.
+            from vllm.model_executor.layers.utils import xcpu_raw_linear_weight
+
+            kv_weights = [
+                xcpu_raw_linear_weight(a.qkv_proj)[a.q_size :] for a in layers_attn
+            ]
+            fused_kv_weight: torch.Tensor | None = torch.cat(kv_weights, dim=0)
+            fused_kv_bias: torch.Tensor | None = None
             if has_bias:
                 kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
-                self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
-            else:
-                self._fused_kv_bias = None
+                fused_kv_bias = torch.cat(kv_biases, dim=0)
+
+            # Prepack the fused KV GEMM into the torch_xcpu BF16 backend and
+            # release both the concatenated raw weight and the per-layer raw
+            # stashes: each qkv_proj keeps its own packed forward path.
+            self._fused_kv_linear = None
+            if (
+                envs.VLLM_USE_XCPU_LINEAR
+                and fused_kv_weight is not None
+                and fused_kv_weight.dtype == torch.bfloat16
+            ):
+                import torch_xcpu
+
+                n, k = fused_kv_weight.shape
+                bias_fp32 = (
+                    fused_kv_bias.float().contiguous()
+                    if fused_kv_bias is not None
+                    else None
+                )
+                if torch_xcpu.ops.bf16_linear_shape_supported(n, k):
+                    try:
+                        self._fused_kv_linear = torch_xcpu.ops.initialize_bf16_linear(
+                            fused_kv_weight.detach(), bias_fp32
+                        )
+                        fused_kv_weight = None
+                        fused_kv_bias = None
+                    except (RuntimeError, ValueError):
+                        self._fused_kv_linear = None
+            self._fused_kv_weight = fused_kv_weight
+            self._fused_kv_bias = fused_kv_bias
+            for attn in layers_attn:
+                # The packed per-layer linear owns the forward path; drop the
+                # raw weight kept alive for this stacking step.
+                attn.qkv_proj._xcpu_raw_weight = None
         else:
             # Quantized linear weights may use packed storage that cannot be
             # consumed by F.linear. Run each projection through its quant method.
             self._fused_kv_weight = None
             self._fused_kv_bias = None
+            self._fused_kv_linear = None
 
         # K-norm weights stacked into one contiguous [num_layers, head_dim]
         # tensor so the per-layer K-norm runs as a single grouped kernel.
@@ -612,7 +659,12 @@ class DFlashQwen3Model(nn.Module):
             self._hidden_norm_weight,
             self._rms_norm_eps,
         )
-        if self._fused_kv_weight is not None:
+        fused_kv_linear = getattr(self, "_fused_kv_linear", None)
+        if fused_kv_linear is not None:
+            # torch_xcpu packed BF16 linear over all layers' KV rows.
+            all_kv_flat = fused_kv_linear(normed_context_states)
+            all_kv = all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
+        elif self._fused_kv_weight is not None:
             if envs.VLLM_USE_XCPU_LINEAR:
                 import torch_xcpu
 

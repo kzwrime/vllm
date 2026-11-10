@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from vllm import envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -28,6 +29,7 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
     RowParallelLinear,
+    UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -313,6 +315,12 @@ class LagunaAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
+        if envs.VLLM_USE_XCPU_LINEAR and isinstance(
+            self.qkv_proj.quant_method, UnquantizedLinearMethod
+        ):
+            # DFlash fused-KV stacking (laguna_dflash) reads the raw KV rows
+            # after load; keep them past the BF16 packed-linear dispatch.
+            self.qkv_proj._xcpu_keep_raw_weight = True
 
         # Output projection
         self.o_proj = RowParallelLinear(

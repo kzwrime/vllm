@@ -87,6 +87,13 @@ def default_unquantized_gemm(
     bias: torch.Tensor | None = None,
 ):
     if envs.VLLM_USE_XCPU_LINEAR:
+        # BF16@BF16 -> BF16/FP32 linears run on torch_xcpu's packed BF16
+        # backend when dispatch_xcpu_bf16_linear took the layer over at load
+        # time (mcpu platforms route through this default GEMM). Everything
+        # else, including pure FP32, keeps the generic torch_xcpu linear.
+        bf16_linear = getattr(layer, "_xcpu_bf16_linear", None)
+        if bf16_linear is not None:
+            return bf16_linear(x)
         import torch_xcpu
 
         return torch_xcpu.ops.linear(x, weight, bias)
@@ -467,6 +474,123 @@ def check_cpu_sgl_kernel(n: int, k: int, dtype: torch.dtype) -> bool:
     return k % 32 == 0 and n % 16 == 0
 
 
+def xcpu_raw_linear_weight(layer: torch.nn.Module) -> torch.Tensor:
+    """Return the layer's raw (unpacked) linear weight.
+
+    The torch_xcpu BF16 linear backend prepacks the weight and frees the raw
+    tensor on the layer. Models that consume raw weight slices after load
+    (e.g. DFlash fused-KV stacking) must read through this accessor.
+    """
+    weight = getattr(layer, "_xcpu_raw_weight", None)
+    if isinstance(weight, torch.Tensor) and weight.numel() > 0:
+        return weight
+    return layer.weight
+
+
+def _xcpu_bf16_runtime_bias(layer: torch.nn.Module) -> torch.Tensor | None:
+    """The bias that vLLM's linear forwards pass down to ``apply``.
+
+    Mirrors ColumnParallelLinear/RowParallelLinear forward: the bias is
+    suppressed by ``skip_bias_add`` and, for row-parallel layers, on every
+    rank but rank 0 so a TP all-reduce never adds it twice.
+    """
+    from vllm.model_executor.layers.linear import RowParallelLinear
+
+    bias = getattr(layer, "bias", None)
+    if not isinstance(bias, torch.Tensor) or bias.ndim != 1:
+        return None
+    if getattr(layer, "skip_bias_add", False):
+        return None
+    if isinstance(layer, RowParallelLinear) and getattr(layer, "tp_rank", 0) > 0:
+        return None
+    return bias
+
+
+def dispatch_xcpu_bf16_linear(layer: torch.nn.Module, remove_weight: bool) -> bool:
+    """Take over a BF16@BF16 -> BF16/FP32 linear with torch_xcpu's BF16 backend.
+
+    Prepacks ``layer.weight`` once at load time into the configured backend
+    (see ``TORCH_XCPU_BF16_LINEAR_BACKEND``) and rewires ``layer.cpu_linear``
+    to the packed implementation. When the layer exclusively owns its weight
+    (``remove_weight``), the raw weight is freed; layers that declared a raw
+    consumer (``_xcpu_keep_raw_weight``, e.g. DFlash fused-KV stacking) keep
+    a stash that the consumer releases. Shared weights (embeddings / tied LM
+    heads, which arrive with ``remove_weight=False``) and pure FP32/FP16 or
+    unsupported-shape layers are left on the generic torch_xcpu linear path.
+
+    Returns True when the packed backend took over the layer.
+    """
+    import torch_xcpu
+
+    # Idempotent re-dispatch (e.g. reload paths): reuse the packed state.
+    bf16_linear = getattr(layer, "_xcpu_bf16_linear", None)
+    if bf16_linear is not None:
+        layer.cpu_linear = lambda x, weight, bias: bf16_linear(x)
+        return True
+
+    # An lm_head excluded from a quant config carries UnquantizedLinearMethod
+    # instead of UnquantizedEmbeddingMethod. Keep its weight raw: tied
+    # embeddings share the Parameter with embed_tokens, and
+    # logits_processor._project_with_head_dtype GEMMs lm_head.weight
+    # directly instead of going through the quant method.
+    from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+
+    if isinstance(layer, ParallelLMHead):
+        return False
+
+    weight = layer.weight
+    if not remove_weight or weight.numel() == 0:
+        # Not exclusively owned (embedding lookup / weight tying still needs
+        # the raw tensor), or already dispatched.
+        return False
+    if weight.dtype != torch.bfloat16 or weight.device.type not in (
+        "privateuseone",
+        "mcpu",
+    ):
+        return False
+    if not torch_xcpu.ops.bf16_linear_shape_supported(weight.size(0), weight.size(1)):
+        return False
+
+    # Router gates (GateLinear) request FP32 logits: BF16@BF16 -> FP32.
+    out_dtype = (
+        torch.float32
+        if getattr(layer, "out_dtype", None) is torch.float32
+        else torch.bfloat16
+    )
+    bias = _xcpu_bf16_runtime_bias(layer)
+    bias_fp32 = bias.float().contiguous() if bias is not None else None
+    try:
+        bf16_linear = torch_xcpu.ops.initialize_bf16_linear(
+            weight.detach(), bias_fp32, out_dtype=out_dtype
+        )
+    except (RuntimeError, ValueError) as e:
+        logger.debug_once(
+            "XCPU BF16 linear backend unavailable (%s); using torch_xcpu linear",
+            e,
+        )
+        return False
+
+    layer._xcpu_bf16_linear = bf16_linear
+    # The runtime weight/bias arguments are ignored: the packed backend owns
+    # the prepacked weight and the bias baked in above.
+    layer.cpu_linear = lambda x, weight, bias: bf16_linear(x)
+    if getattr(layer, "_xcpu_keep_raw_weight", False):
+        # Deferred consumer (DFlash fused-KV stacking); released by the model
+        # once it has built its own packed buffers.
+        layer._xcpu_raw_weight = weight.detach()
+    layer.weight = torch.nn.Parameter(
+        torch.empty(0, dtype=weight.dtype, device=weight.device),
+        requires_grad=False,
+    )
+    logger.debug_once(
+        "CPU unquantized GEMM dispatch: using torch_xcpu BF16 linear "
+        "backend=%s out_dtype=%s",
+        bf16_linear.params.backend.name.lower(),
+        out_dtype,
+    )
+    return True
+
+
 def dispatch_cpu_unquantized_gemm(
     layer: torch.nn.Module,
     remove_weight: bool,
@@ -520,9 +644,17 @@ def dispatch_cpu_unquantized_gemm(
     dtype = layer.weight.dtype
 
     if envs.VLLM_USE_XCPU_LINEAR:
+        # BF16@BF16 -> BF16/FP32 linears whose weight is exclusively owned by
+        # the linear layer go through torch_xcpu's packed BF16 linear backend
+        # (weight prepacked at load time, raw weight freed afterwards).
+        if dispatch_xcpu_bf16_linear(layer, remove_weight):
+            return
         import torch_xcpu
 
-        # has_bias = getattr(layer, "bias", None) is not None
+        # Everything else keeps the generic torch_xcpu linear: pure FP32 or
+        # FP16 weights, unsupported BF16 shapes, and shared weights (the
+        # LM head / embedding path passes remove_weight=False because its
+        # weight must stay raw for F.embedding and weight tying).
         layer.cpu_linear = lambda x, weight, bias: torch_xcpu.ops.linear(
             x, weight, bias
         )

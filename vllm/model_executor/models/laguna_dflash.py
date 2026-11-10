@@ -157,9 +157,18 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
         layers_attn: list[nn.Module],
         has_bias: bool,
     ) -> None:
+        # The qkv_proj weight may already be prepacked (and freed) by the
+        # torch_xcpu BF16 linear dispatch; read through the raw stash.
+        from vllm.model_executor.layers.utils import xcpu_raw_linear_weight
+
         self._kv_weights = torch.stack(
-            [a.qkv_proj.weight[a.q_size :] for a in layers_attn], dim=0
+            [xcpu_raw_linear_weight(a.qkv_proj)[a.q_size :] for a in layers_attn],
+            dim=0,
         ).contiguous()
+        for attn in layers_attn:
+            # The packed per-layer linear owns the forward path; release the
+            # raw weight kept alive for this stacking step.
+            attn.qkv_proj._xcpu_raw_weight = None
         if has_bias:
             self._kv_biases: torch.Tensor | None = torch.stack(
                 [a.qkv_proj.bias[a.q_size :] for a in layers_attn], dim=0
