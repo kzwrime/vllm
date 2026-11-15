@@ -317,6 +317,7 @@ if TYPE_CHECKING:
     VLLM_XCPU_FUSE_GDN_IN_PROJ_QKVZBA: bool = True
     VLLM_XCPU_COMPILE_PASS_DEEPSEEK_V32_FUSED_MLA_QNORM_QB_UK_ROPE_CACHE: bool = False
     VLLM_XCPU_COMPILE_PASS_DEEPSEEK_V32_FUSED_MLA_ADD_NORM_QKVA_QNORM_QB_UK_ROPE_CACHE: bool = False  # noqa: E501
+    VLLM_XCPU_COMPILE_PASS_FUSED_ADD_NORM_ROUTER_GEMM: bool = False
     VLLM_XCPU_USE_FUSED_FFN: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
@@ -2199,6 +2200,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
                     "QNORM_QB_UK_ROPE_CACHE",
                     "0",
                 )
+            )
+        )
+    ),
+    "VLLM_XCPU_COMPILE_PASS_FUSED_ADD_NORM_ROUTER_GEMM": lambda: bool(
+        int(
+            os.getenv(
+                "VLLM_XCPU_COMPILE_PASS_FUSED_ADD_NORM_ROUTER_GEMM",
+                "0",
             )
         )
     ),
